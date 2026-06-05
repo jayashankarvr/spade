@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 
 from spade.logging_config import get_logger
-from spade.exceptions import IndexError as SPADEIndexError, IndexCorruptedError, DependencyError
+from spade.exceptions import IndexStoreError as SPADEIndexError, IndexCorruptedError, DependencyError
 
 logger = get_logger("search.index")
 

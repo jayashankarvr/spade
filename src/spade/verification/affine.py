@@ -131,8 +131,9 @@ class AffineVerifier:
         target: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, float]:
         """Iteratively Reweighted Least Squares for Huber loss."""
-        # Initialize with L2 solution
-        M, b, _ = self._solve_l2(source, target)
+        # Initialize with L2 solution. Capture its RSS so that `rss` is always
+        # defined even if the first IRLS iteration's matrix inversion fails.
+        M, b, rss = self._solve_l2(source, target)
 
         n = source.shape[0]
         X = np.hstack([source, np.ones((n, 1))])

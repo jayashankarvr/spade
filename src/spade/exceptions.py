@@ -11,47 +11,47 @@ class ImageError(SPADEError):
     pass
 
 
-class InvalidImageError(ImageError):
+class InvalidImageError(ImageError, ValueError):
     """Raised when an image is invalid or corrupted."""
     pass
 
 
-class ImageFormatError(ImageError):
+class ImageFormatError(ImageError, ValueError):
     """Raised when image format is unsupported."""
     pass
 
 
-class ImageSizeError(ImageError):
+class ImageSizeError(ImageError, ValueError):
     """Raised when image dimensions are invalid."""
     pass
 
 
-class ConfigurationError(SPADEError):
+class ConfigurationError(SPADEError, ValueError):
     """Raised when configuration parameters are invalid."""
     pass
 
 
-class IndexError(SPADEError):
+class IndexStoreError(SPADEError):
     """Base exception for index-related errors."""
     pass
 
 
-class IndexNotFoundError(IndexError):
+class IndexNotFoundError(IndexStoreError):
     """Raised when trying to load a non-existent index."""
     pass
 
 
-class IndexCorruptedError(IndexError):
+class IndexCorruptedError(IndexStoreError):
     """Raised when index file is corrupted."""
     pass
 
 
-class TargetNotFoundError(IndexError):
+class TargetNotFoundError(IndexStoreError):
     """Raised when target image ID is not found in index."""
     pass
 
 
-class TargetExistsError(IndexError):
+class TargetExistsError(IndexStoreError):
     """Raised when trying to add a target that already exists."""
     pass
 

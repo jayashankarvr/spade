@@ -23,6 +23,10 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_IMAGE_PIXELS = 50_000_000  # 50 megapixels (prevent decompression bombs)
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "BMP", "TIFF", "WEBP"}
 
+# Enforce the pixel cap at decode time too: the header-based size check can be
+# spoofed, so make PIL itself raise DecompressionBombError during load/convert.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
 
 class MatchCoord(BaseModel):
     """Coordinate pair."""
@@ -401,8 +405,12 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
                 heatmap_base64=heatmap_b64,
             )
 
-        except Exception as e:
+        except HTTPException:
+            raise
+        except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Match failed: {str(e)}")
 
     @app.get("/targets")
     async def list_targets():

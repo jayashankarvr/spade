@@ -77,6 +77,20 @@ class TestAffineVerifier:
         )
         assert result_5x5.dof == 63
 
+    def test_huber_degenerate_input_does_not_crash(self):
+        """Regression: a singular system (constant patch, no regularization)
+        used to raise UnboundLocalError in the Huber IRLS path because `rss`
+        was only assigned after the matrix inversion. It must fail gracefully."""
+        verifier = AffineVerifier(loss="huber", regularization=0.0)
+        constant = np.full((3, 3, 3), 0.5, dtype=np.float32)
+
+        result = verifier.verify(constant, constant)
+
+        # Must return a result object, not raise
+        assert isinstance(result, VerificationResult)
+        assert not result.success
+        assert result.rss == float("inf")
+
     def test_mismatched_shapes_fail(self):
         verifier = AffineVerifier()
 

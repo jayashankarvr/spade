@@ -1,5 +1,6 @@
 """Distributed sharded index for large-scale search."""
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 
 from spade.search.index import ANNIndex, SearchResult
-from spade.exceptions import DependencyError, ConfigurationError, IndexError as SPADEIndexError
+from spade.exceptions import DependencyError, ConfigurationError, IndexStoreError as SPADEIndexError
 
 
 @dataclass
@@ -61,8 +62,14 @@ class ShardedIndex:
             ]
 
     def _get_shard_id(self, image_id: str) -> int:
-        """Compute shard index from image_id hash."""
-        return hash(image_id) % self.num_shards
+        """Compute shard index from image_id hash.
+
+        Uses a stable hash (not the built-in ``hash()``, which is salted per
+        process via PYTHONHASHSEED) so the same image_id maps to the same shard
+        across processes and restarts.
+        """
+        digest = hashlib.md5(image_id.encode("utf-8")).hexdigest()
+        return int(digest, 16) % self.num_shards
 
     def add(
         self,

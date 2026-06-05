@@ -145,6 +145,10 @@ def index(directory: str, output: str, pattern: str):
         image_files.extend(dir_path.glob(p))
         image_files.extend(dir_path.glob(p.upper()))
 
+    # De-duplicate: on case-insensitive filesystems the lowercase and uppercase
+    # globs return the same files, which would otherwise index each image twice.
+    image_files = sorted(set(image_files))
+
     if not image_files:
         click.echo("No images found.")
         return
