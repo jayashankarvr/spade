@@ -8,8 +8,10 @@ from spade import ForensicsEngine, Config
 
 class TestConfigValidation:
     def test_invalid_patch_size(self):
-        with pytest.raises(ValueError, match="patch_size must be 3, 4, 5, or 6"):
-            Config(patch_size=7)
+        with pytest.raises(ValueError, match="patch_size must be between 3 and 16"):
+            Config(patch_size=17)
+        with pytest.raises(ValueError, match="patch_size must be between 3 and 16"):
+            Config(patch_size=2)
 
     def test_invalid_stride(self):
         with pytest.raises(ValueError, match="stride must be >= 1"):

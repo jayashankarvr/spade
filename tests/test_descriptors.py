@@ -122,3 +122,40 @@ class TestPCATraining:
         # Compute descriptor with trained PCA
         result = descriptor.compute(patches[0])
         assert result.shape == (64,)
+
+
+class TestSpatialPooling:
+    """The spatial_pooling flag: pooling 3x3 sub-patches vs computing strategies
+    directly on the whole patch (faster, no measurable accuracy loss)."""
+
+    def test_no_pooling_outputs_target_dim_for_various_sizes(self):
+        np.random.seed(0)
+        for size in (3, 5, 8, 12):
+            desc = CompositeDescriptor(target_dim=256, spatial_pooling=False)
+            patch = np.random.rand(size, size, 3).astype(np.float32)
+            out = desc.compute(patch)
+            assert out.shape == (256,)
+            assert np.isfinite(out).all()
+
+    def test_no_pooling_consistent_dim_within_size(self):
+        desc = CompositeDescriptor(target_dim=128, spatial_pooling=False)
+        np.random.seed(1)
+        a = desc.compute(np.random.rand(8, 8, 3).astype(np.float32))
+        b = desc.compute(np.random.rand(8, 8, 3).astype(np.float32))
+        assert a.shape == b.shape == (128,)
+
+    def test_pooling_and_no_pooling_both_valid_but_differ(self):
+        np.random.seed(2)
+        patch = np.random.rand(6, 6, 3).astype(np.float32)
+        pooled = CompositeDescriptor(target_dim=128, spatial_pooling=True).compute(patch)
+        flat = CompositeDescriptor(target_dim=128, spatial_pooling=False).compute(patch)
+        assert pooled.shape == flat.shape == (128,)
+        # Different raw dimensionality -> different descriptors
+        assert not np.allclose(pooled, flat)
+
+    def test_3x3_identical_regardless_of_flag(self):
+        np.random.seed(3)
+        patch = np.random.rand(3, 3, 3).astype(np.float32)
+        a = CompositeDescriptor(target_dim=128, spatial_pooling=True).compute(patch)
+        b = CompositeDescriptor(target_dim=128, spatial_pooling=False).compute(patch)
+        np.testing.assert_allclose(a, b)

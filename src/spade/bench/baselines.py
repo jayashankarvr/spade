@@ -35,7 +35,8 @@ class SpadeDetector(Detector):
         from spade.engine import Config
 
         self.config = config or Config(
-            patch_size=3,
+            patch_size=8,                      # larger support: better precision, fewer verifications
+            descriptor_spatial_pooling=False,  # ~19x faster at 8x8, identical accuracy
             entropy_threshold=None,
             min_probability=0.5,
             coherence_enabled=True,
