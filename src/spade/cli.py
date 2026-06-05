@@ -71,6 +71,7 @@ def safe_load_image(path: str) -> np.ndarray:
 @click.option("-p", "--patch-size", default=3, help="Patch size (3, 4, 5, or 6)")
 @click.option("-e", "--entropy", default=2.5, help="Entropy threshold (0 to disable)")
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
+@click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 def match(
     source: str,
@@ -79,6 +80,7 @@ def match(
     patch_size: int,
     entropy: float,
     output: Optional[str],
+    json_output: Optional[str],
     verbose: bool,
 ):
     """Match SOURCE image against TARGET image."""
@@ -129,6 +131,21 @@ def match(
         heatmap_colored = colorize_heatmap(result.heatmap)
         Image.fromarray(heatmap_colored).save(output)
         click.echo(f"\nHeatmap saved to: {output}")
+
+    if json_output:
+        from spade.report import build_report, write_report
+
+        report = build_report(
+            result=result,
+            config=config,
+            source_path=source,
+            source_image=source_img,
+            target_path=target,
+            target_image=target_img,
+            heatmap_path=output if (output and result.heatmap is not None) else None,
+        )
+        write_report(report, json_output)
+        click.echo(f"\nForensic report written to: {json_output}")
 
 
 @cli.command()

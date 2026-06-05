@@ -651,6 +651,8 @@ class ForensicsEngine:
                     patch_size=effective_size,
                     probability=probability,
                     image_id=image_id,
+                    color_M=verification.M,
+                    color_b=verification.b,
                 ))
 
         best_match = None

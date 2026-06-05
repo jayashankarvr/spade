@@ -14,6 +14,10 @@ class Match:
     patch_size: int
     probability: float
     image_id: str = ""
+    # Recovered affine color transform (target = M @ source + b) from verification.
+    # Optional so existing callers/tests that build Match directly keep working.
+    color_M: Optional[np.ndarray] = None
+    color_b: Optional[np.ndarray] = None
 
 
 class SpatialAggregator:
