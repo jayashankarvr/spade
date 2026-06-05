@@ -61,11 +61,11 @@ class SpadeDetector(Detector):
             matches = result.matches
             score = float(result.best_match.probability) if result.best_match else 0.0
 
-        mask = np.zeros((h, w), dtype=bool)
-        for m in matches:
-            x, y = int(m.source_coord[0]), int(m.source_coord[1])
-            ps = int(m.patch_size)
-            mask[max(0, y):min(h, y + ps), max(0, x):min(w, x + ps)] = True
+        # Spatial-density localization: keep the largest connected component of
+        # the matched footprints (drops scattered background false positives).
+        from spade.aggregation.localize import localize
+
+        mask = localize(matches, (h, w), largest_component=True)
         return mask, score
 
 
