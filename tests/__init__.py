@@ -1,0 +1,1 @@
+"""SPADE test suite."""
