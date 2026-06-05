@@ -58,6 +58,10 @@ api = [
 lsh = [
     "datasketch>=1.5.0",
 ]
+# Benchmark harness (synthetic data, metrics, baselines)
+bench = [
+    "opencv-python-headless>=4.6.0",
+]
 # Phase 3: GPU acceleration
 gpu = [
     "cupy-cuda12x>=12.0.0",
@@ -93,11 +97,8 @@ full = [
 spade = "spade.cli:main"
 
 [project.urls]
-# TODO: Update these URLs with your GitHub username before publishing to PyPI
-# Temporary: using spade-forensics as placeholder
-Homepage = "https://github.com/spade-forensics/spade"
-Documentation = "https://spade-forensics.github.io/spade"
-Repository = "https://github.com/spade-forensics/spade"
+Homepage = "https://github.com/jayashankarvr/spade"
+Repository = "https://github.com/jayashankarvr/spade"
 Issues = "https://github.com/spade-forensics/spade/issues"
 
 [tool.setuptools.packages.find]
