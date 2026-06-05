@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  spade-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: spade-forensics:latest
+    container_name: spade-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistent storage for indexes
+      - spade-data:/data
+      # Optional: mount local images directory
+      # - ./images:/images:ro
+    environment:
+      # SPADE Configuration
+      - SPADE_PATCH_SIZE=3
+      - SPADE_DESCRIPTOR_DIM=256
+      - SPADE_MIN_PROBABILITY=0.5
+      - SPADE_MAX_TARGETS=1000
+      - SPADE_PYRAMID_ENABLED=false
+      - SPADE_LSH_ENABLED=false
+      - SPADE_COHERENCE_ENABLED=true
+      # Uncomment for GPU support (requires NVIDIA Docker)
+      # - SPADE_USE_GPU=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Optional: Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: spade-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # For HTTPS, mount certificates:
+      # - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - spade-api
+    restart: unless-stopped
+    profiles:
+      - with-nginx
+
+volumes:
+  spade-data:
+    driver: local
+
+networks:
+  default:
+    name: spade-network

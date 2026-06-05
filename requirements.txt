@@ -1,0 +1,17 @@
+# Core dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+pillow>=8.0.0
+scikit-learn>=0.24.0
+
+# Search
+faiss-cpu>=1.7.0
+
+# CLI
+click>=8.0.0
+
+# Development (optional)
+# pytest>=7.0.0
+# pytest-cov>=3.0.0
+# black>=22.0.0
+# mypy>=0.950
