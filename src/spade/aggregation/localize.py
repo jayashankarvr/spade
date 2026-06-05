@@ -13,6 +13,7 @@ where the splice lives.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
 import numpy as np
@@ -71,3 +72,32 @@ def mask_to_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
     return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+
+@dataclass
+class Localization:
+    """Predicted localization plus the image-level detection score.
+
+    ``area_fraction`` (fraction of the image covered by the largest matched
+    component) is SPADE's detection signal: empirically it separates spliced
+    from clean images far better than match counts (ROC-AUC ~0.86 vs ~0.50 for
+    a match-count score on synthetic recolored splices; see BENCHMARKS.md). The
+    spatial structure discriminates, not the number of matches.
+    """
+    mask: np.ndarray                       # bool (H, W) predicted splice mask
+    bbox: Tuple[int, int, int, int]        # (x, y, w, h) of the mask
+    area: int                              # mask pixel count
+    area_fraction: float                   # area / (H * W) — the detection score in [0, 1]
+
+
+def localize_region(
+    matches: Sequence,
+    shape: Tuple[int, int],
+    largest_component: bool = True,
+) -> Localization:
+    """Localize the splice and compute its detection score in one pass."""
+    mask = localize(matches, shape, largest_component=largest_component)
+    area = int(mask.sum())
+    h, w = shape
+    fraction = area / float(h * w) if h * w else 0.0
+    return Localization(mask=mask, bbox=mask_to_bbox(mask), area=area, area_fraction=fraction)

@@ -56,17 +56,16 @@ class SpadeDetector(Detector):
         # Prefer coherent-region matches (high precision); fall back to all matches.
         if result.coherent_regions:
             matches = [m for r in result.coherent_regions for m in r.matches]
-            score = float(sum(len(r.matches) for r in result.coherent_regions))
         else:
             matches = result.matches
-            score = float(result.best_match.probability) if result.best_match else 0.0
 
         # Spatial-density localization: keep the largest connected component of
-        # the matched footprints (drops scattered background false positives).
-        from spade.aggregation.localize import localize
+        # the matched footprints. Its area fraction is the detection score
+        # (match counts are ~random; spatial structure discriminates).
+        from spade.aggregation.localize import localize_region
 
-        mask = localize(matches, (h, w), largest_component=True)
-        return mask, score
+        loc = localize_region(matches, (h, w), largest_component=True)
+        return loc.mask, loc.area_fraction
 
 
 class RootSiftRansacDetector(Detector):

@@ -6,6 +6,7 @@ from spade.aggregation.heatmap import Match
 from spade.aggregation.localize import (
     largest_connected_component,
     localize,
+    localize_region,
     mask_to_bbox,
     match_footprint_mask,
 )
@@ -56,3 +57,21 @@ class TestLocalize:
 
     def test_mask_to_bbox_empty(self):
         assert mask_to_bbox(np.zeros((4, 4), dtype=bool)) == (0, 0, 0, 0)
+
+
+class TestLocalizeRegion:
+    def test_area_fraction_is_detection_score(self):
+        matches = [_m(x, y) for x in range(2, 8) for y in range(2, 8)]
+        loc = localize_region(matches, (20, 20))
+        assert loc.area == int(loc.mask.sum())
+        assert 0.0 < loc.area_fraction <= 1.0
+        assert abs(loc.area_fraction - loc.area / 400.0) < 1e-9
+
+    def test_more_matches_higher_score(self):
+        small = [_m(x, y) for x in range(2, 5) for y in range(2, 5)]
+        large = [_m(x, y) for x in range(2, 14) for y in range(2, 14)]
+        assert localize_region(large, (24, 24)).area_fraction > localize_region(small, (24, 24)).area_fraction
+
+    def test_empty_matches_zero_score(self):
+        loc = localize_region([], (16, 16))
+        assert loc.area == 0 and loc.area_fraction == 0.0 and loc.bbox == (0, 0, 0, 0)

@@ -72,6 +72,18 @@ class TestBuildReport:
         assert report["result"]["best_match"] is None
         assert report["result"]["num_matches"] == 0
 
+    def test_localization_present_with_source_image(self):
+        m = Match(source_coord=(2, 2), target_coord=(0, 0), patch_size=3, probability=0.9, image_id="t")
+        report = build_report(result=_result([m]), config=Config(), source_image=np.zeros((20, 20, 3)))
+        loc = report["result"]["localization"]
+        assert loc is not None
+        assert "bbox" in loc and "detection_score" in loc
+        assert 0.0 <= loc["detection_score"] <= 1.0
+
+    def test_localization_absent_without_source_image(self):
+        report = build_report(result=_result([]), config=Config())
+        assert report["result"]["localization"] is None
+
     def test_config_subset_recorded(self):
         report = build_report(result=_result([]), config=Config(patch_size=4))
         assert report["config"]["patch_size"] == 4

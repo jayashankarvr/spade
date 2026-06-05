@@ -156,6 +156,21 @@ def build_report(
     if generated_at is None:
         generated_at = datetime.now(timezone.utc).isoformat()
 
+    # Localization + detection score from the spatial-density component (in
+    # source/query coordinates). Computed when the source image shape is known.
+    localization: Optional[Dict[str, Any]] = None
+    if source_image is not None:
+        from spade.aggregation.localize import localize_region
+
+        coherent = [m for r in result.coherent_regions for m in r.matches]
+        matches = coherent if coherent else result.matches
+        loc = localize_region(matches, (int(source_image.shape[0]), int(source_image.shape[1])))
+        localization = {
+            "bbox": {"x": loc.bbox[0], "y": loc.bbox[1], "width": loc.bbox[2], "height": loc.bbox[3]},
+            "area_px": loc.area,
+            "detection_score": round(loc.area_fraction, 6),
+        }
+
     regions: List[Dict[str, Any]] = []
     for region in result.coherent_regions:
         regions.append(
@@ -182,6 +197,7 @@ def build_report(
             "match_found": result.best_match is not None,
             "num_matches": len(result.matches),
             "num_coherent_regions": len(result.coherent_regions),
+            "localization": localization,
             "best_match": _match_dict(result.best_match),
             "coherent_regions": regions,
             "stats": dict(result.stats),
