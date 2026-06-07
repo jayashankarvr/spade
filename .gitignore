@@ -97,6 +97,9 @@ dmypy.json
 *.swo
 *~
 
+# Internal/dev docs — kept local, not published
+_internal/
+
 # SPADE specific
 *.index
 *.meta.npy
