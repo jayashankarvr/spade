@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -138,6 +137,7 @@ def build_report(
     heatmap_path: Optional[str] = None,
     tool_version: Optional[str] = None,
     generated_at: Optional[str] = None,
+    compute_cues: bool = True,
 ) -> Dict[str, Any]:
     """Build a forensic report dict from a MatchResult.
 
@@ -163,6 +163,9 @@ def build_report(
     if source_image is not None:
         from spade.aggregation.localize import localize_region
 
+        # localize_region keeps the single largest connected component, matching
+        # the single-splice positioning. A genuine multi-splice image would need
+        # per-region localization here.
         coherent = [m for r in result.coherent_regions for m in r.matches]
         matches = coherent if coherent else result.matches
         loc = localize_region(matches, (int(source_image.shape[0]), int(source_image.shape[1])))
@@ -174,8 +177,9 @@ def build_report(
 
     # Image-level forensic cues, independent of the match. Computed on the source
     # (suspected tampered) image. Currently: resize/resampling inconsistency.
+    # Opt-out via compute_cues=False (it does a per-window resample round trip).
     cues: Optional[Dict[str, Any]] = None
-    if source_image is not None:
+    if compute_cues and source_image is not None:
         from spade.scale import scale_inconsistency
 
         si = scale_inconsistency(source_image)
@@ -227,11 +231,6 @@ def build_report(
         "cues": cues,
         "artifacts": {"heatmap": heatmap_path},
     }
-
-
-@dataclass
-class _NumpyEncoderHelper:
-    pass
 
 
 def _json_default(o: Any) -> Any:

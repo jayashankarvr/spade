@@ -5,6 +5,19 @@ All notable changes to SPADE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
+- **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.
+- **Spatial-density localization** (`spade.aggregation.localize`): keep the largest connected component of the matched footprints; the component's area fraction is the image-level detection score.
+- **Larger-patch support**: `Config.descriptor_spatial_pooling` (compute descriptors directly on the whole patch instead of pooling 3x3 sub-patches - much faster at larger sizes); `patch_size` range widened from 3-6 to 3-16.
+- **Benchmark harness** (`spade.bench`): synthetic recolored-splice generator, localization/detection metrics, RootSIFT+RANSAC baseline, and a runner (`python -m spade.bench.runner`). Requires the `bench` extra.
+
+### Changed
+- `Match` now carries the recovered affine color transform `(M, b)` (previously computed for scoring then discarded).
+- CLI `match`/`serve` `--patch-size` now accepts 3-16.
+
 ## [0.2.1] - 2026-06-05
 
 ### Fixed
@@ -21,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known limitations
 - In `scoring_mode="bayes"`, `max_targets` LRU eviction is not enforced (the Bayes engine keeps its own target stores). To be addressed in the v1 redesign.
 
-## [Unreleased]
+## [0.2.0]
 
 ### Added
 - **Image Pyramids**: Multi-scale analysis with configurable pyramid levels (1x, 0.5x, 0.25x, 0.125x) for scale-invariant matching

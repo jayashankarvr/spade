@@ -36,8 +36,8 @@ def validate_params(threshold: float, patch_size: int, entropy: float) -> None:
     """Validate common CLI parameters."""
     if not 0 <= threshold <= 1:
         raise click.BadParameter(f"threshold must be between 0 and 1, got {threshold}")
-    if patch_size not in (3, 4, 5, 6):
-        raise click.BadParameter(f"patch-size must be 3, 4, 5, or 6, got {patch_size}")
+    if not (3 <= patch_size <= 16):
+        raise click.BadParameter(f"patch-size must be between 3 and 16, got {patch_size}")
     if entropy < 0:
         raise click.BadParameter(f"entropy must be >= 0, got {entropy}")
 
@@ -68,7 +68,7 @@ def safe_load_image(path: str) -> np.ndarray:
 @click.argument("source", type=click.Path(exists=True))
 @click.argument("target", type=click.Path(exists=True))
 @click.option("-t", "--threshold", default=0.5, help="Minimum match probability (0-1)")
-@click.option("-p", "--patch-size", default=3, help="Patch size (3, 4, 5, or 6)")
+@click.option("-p", "--patch-size", default=3, help="Patch size (3-16)")
 @click.option("-e", "--entropy", default=2.5, help="Entropy threshold (0 to disable)")
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
 @click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
@@ -280,7 +280,7 @@ def search(
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8000, help="Port to listen on")
-@click.option("--patch-size", default=3, help="Patch size (3, 4, 5, or 6)")
+@click.option("--patch-size", default=3, help="Patch size (3-16)")
 @click.option("--pyramid/--no-pyramid", default=False, help="Enable multi-scale pyramid")
 @click.option("--lsh/--no-lsh", default=False, help="Enable LSH pre-filtering")
 def serve(

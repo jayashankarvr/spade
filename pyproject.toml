@@ -99,7 +99,7 @@ spade = "spade.cli:main"
 [project.urls]
 Homepage = "https://github.com/jayashankarvr/spade"
 Repository = "https://github.com/jayashankarvr/spade"
-Issues = "https://github.com/spade-forensics/spade/issues"
+Issues = "https://github.com/jayashankarvr/spade/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

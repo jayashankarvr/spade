@@ -61,7 +61,9 @@ def native_scale_fraction(
 
     errs = np.array(errs)
     floor = errs[fractions >= 0.95].mean() if (fractions >= 0.95).any() else errs[0]
-    thr = floor + tol * (errs.max() - floor) + 1.0  # small tolerance above the lossless floor
+    # Tolerance above the lossless floor. The +1.0 is in uint8 MSE units (inputs are
+    # coerced to uint8 by _as_uint8), absorbing tiny resample noise near native scale.
+    thr = floor + tol * (errs.max() - floor) + 1.0
     ok = fractions[errs <= thr]
     return float(ok.min()) if len(ok) else 1.0
 
@@ -109,12 +111,9 @@ def scale_inconsistency(
 ) -> ScaleInconsistency:
     """Compute the resize-inconsistency cue and locate the most anomalous window."""
     h, w = image.shape[:2]
+    grid = scale_inconsistency_map(image, window=window, stride=stride, **kwargs)
     ys = list(range(0, max(1, h - window + 1), stride))
     xs = list(range(0, max(1, w - window + 1), stride))
-    grid = np.full((len(ys), len(xs)), np.nan, dtype=np.float32)
-    for i, y in enumerate(ys):
-        for j, x in enumerate(xs):
-            grid[i, j] = native_scale_fraction(image[y:y + window, x:x + window], **kwargs)
 
     vals = grid[np.isfinite(grid)]
     if vals.size < 2:
