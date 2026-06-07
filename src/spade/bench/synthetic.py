@@ -102,6 +102,7 @@ def make_recolored_splice(
     fragment_size: int = 24,
     color_grade_strength: float = 0.15,
     jpeg_quality: Optional[int] = None,
+    splice_upscale: float = 1.0,
 ) -> SpliceSample:
     """Generate one recolored-splice sample with ground truth.
 
@@ -111,6 +112,10 @@ def make_recolored_splice(
         fragment_size: side length of the spliced square region.
         color_grade_strength: magnitude of the recoloring (0 = none).
         jpeg_quality: if set, JPEG-recompress the tampered image at this quality.
+        splice_upscale: if > 1, the fragment is downscaled by this factor then
+            scaled back up before pasting, so it carries the blur of a resized
+            splice (a lower native scale than the host) - exercises the
+            scale-inconsistency cue.
     """
     rng = np.random.RandomState(seed)
 
@@ -126,6 +131,13 @@ def make_recolored_splice(
     M, b = _random_color_transform(rng, color_grade_strength)
     recolored = _apply_color_transform(region01, M, b)
     recolored_u8 = (recolored * 255).astype(np.uint8)
+
+    if splice_upscale > 1.0:
+        small = max(2, int(round(fs / splice_upscale)))
+        img = Image.fromarray(recolored_u8)
+        recolored_u8 = np.asarray(
+            img.resize((small, small), Image.LANCZOS).resize((fs, fs), Image.BICUBIC)
+        )
 
     # Paste location within the host
     lx = rng.randint(0, image_size - fs + 1)
@@ -153,6 +165,7 @@ def make_recolored_splice(
             "fragment_size": fs,
             "color_grade_strength": color_grade_strength,
             "jpeg_quality": jpeg_quality,
+            "splice_upscale": splice_upscale,
             "donor_region": (fx, fy, fs, fs),
         },
     )

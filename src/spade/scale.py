@@ -21,6 +21,9 @@ difference that the cue relies on stays clear.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Tuple
+
 import numpy as np
 from PIL import Image
 
@@ -84,14 +87,56 @@ def scale_inconsistency_map(
     return grid
 
 
+@dataclass
+class ScaleInconsistency:
+    """Image-level resize/resampling cue.
+
+    ``score`` is ~0 for a uniformly-native image and grows when one region's
+    native scale differs from the rest (a splice that was resized before pasting).
+    ``anomaly_bbox`` is the window with the lowest native scale - the likely
+    resized region.
+    """
+    score: float
+    min_fraction: float
+    median_fraction: float
+    anomaly_bbox: Tuple[int, int, int, int]   # (x, y, w, h)
+    window: int
+    stride: int
+
+
+def scale_inconsistency(
+    image: np.ndarray, window: int = 64, stride: int = 32, **kwargs
+) -> ScaleInconsistency:
+    """Compute the resize-inconsistency cue and locate the most anomalous window."""
+    h, w = image.shape[:2]
+    ys = list(range(0, max(1, h - window + 1), stride))
+    xs = list(range(0, max(1, w - window + 1), stride))
+    grid = np.full((len(ys), len(xs)), np.nan, dtype=np.float32)
+    for i, y in enumerate(ys):
+        for j, x in enumerate(xs):
+            grid[i, j] = native_scale_fraction(image[y:y + window, x:x + window], **kwargs)
+
+    vals = grid[np.isfinite(grid)]
+    if vals.size < 2:
+        bw, bh = min(window, w), min(window, h)
+        return ScaleInconsistency(0.0, 1.0, 1.0, (0, 0, bw, bh), window, stride)
+
+    i, j = np.unravel_index(np.nanargmin(grid), grid.shape)
+    x0, y0 = xs[j], ys[i]
+    return ScaleInconsistency(
+        score=float(np.median(vals) - vals.min()),
+        min_fraction=float(vals.min()),
+        median_fraction=float(np.median(vals)),
+        anomaly_bbox=(x0, y0, min(window, w - x0), min(window, h - y0)),
+        window=window,
+        stride=stride,
+    )
+
+
 def scale_inconsistency_score(image: np.ndarray, window: int = 64, stride: int = 32, **kwargs) -> float:
     """Single image-level score: how much the native scale varies across the image.
 
     ~0 for a uniformly-native image; larger when some region was resized relative
     to the rest (a splice cue). Computed as (median - min) of the window map.
     """
-    grid = scale_inconsistency_map(image, window=window, stride=stride, **kwargs)
-    vals = grid[np.isfinite(grid)]
-    if vals.size < 2:
-        return 0.0
-    return float(np.median(vals) - vals.min())
+    return scale_inconsistency(image, window=window, stride=stride, **kwargs).score

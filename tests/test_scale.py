@@ -5,6 +5,7 @@ from PIL import Image
 
 from spade.scale import (
     native_scale_fraction,
+    scale_inconsistency,
     scale_inconsistency_map,
     scale_inconsistency_score,
 )
@@ -66,3 +67,25 @@ class TestScaleInconsistencyCue:
     def test_map_shape(self):
         grid = scale_inconsistency_map(_texture(7, 128), window=64, stride=32)
         assert grid.ndim == 2 and np.isfinite(grid).all()
+
+
+class TestScaleInconsistencyResult:
+    def test_uniform_image_low_score(self):
+        si = scale_inconsistency(_texture(8, 192), window=64, stride=32)
+        assert si.score < 0.25
+        assert 0.0 < si.min_fraction <= 1.0
+
+    def test_resized_region_flagged_and_localized(self):
+        host = _texture(9, 192)
+        frag = _upscale(_texture(10, 64), factor=2.0)  # blurry resized splice
+        tampered = host.copy()
+        tampered[64:128, 64:128] = frag
+        si = scale_inconsistency(tampered, window=64, stride=32)
+        assert si.score > 0.2
+        # the flagged anomaly window should overlap the splice region
+        ax, ay, aw, ah = si.anomaly_bbox
+        assert 32 <= ax <= 96 and 32 <= ay <= 96
+
+    def test_score_delegates(self):
+        img = _texture(11, 160)
+        assert scale_inconsistency_score(img) == scale_inconsistency(img).score

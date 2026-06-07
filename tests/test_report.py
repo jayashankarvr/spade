@@ -84,6 +84,18 @@ class TestBuildReport:
         report = build_report(result=_result([]), config=Config())
         assert report["result"]["localization"] is None
 
+    def test_cues_present_with_source_image(self):
+        report = build_report(result=_result([]), config=Config(), source_image=np.zeros((80, 80, 3)))
+        cues = report["cues"]
+        assert cues is not None
+        si = cues["scale_inconsistency"]
+        assert "score" in si and "anomaly_bbox" in si
+        assert 0.0 <= si["score"] <= 1.0
+
+    def test_cues_absent_without_source_image(self):
+        report = build_report(result=_result([]), config=Config())
+        assert report["cues"] is None
+
     def test_config_subset_recorded(self):
         report = build_report(result=_result([]), config=Config(patch_size=4))
         assert report["config"]["patch_size"] == 4

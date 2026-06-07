@@ -40,6 +40,20 @@ class TestSyntheticGenerator:
         assert s.mask.sum() == 0
         assert s.params.get("negative") is True
 
+    def test_splice_upscale_blurs_the_region(self):
+        from spade.scale import native_scale_fraction
+
+        sharp = make_recolored_splice(seed=12, image_size=128, fragment_size=64,
+                                      color_grade_strength=0.0, splice_upscale=1.0)
+        blur = make_recolored_splice(seed=12, image_size=128, fragment_size=64,
+                                     color_grade_strength=0.0, splice_upscale=2.0)
+        assert blur.params["splice_upscale"] == 2.0
+        x, y, w, h = blur.bbox
+        # the resized splice region has a lower native scale (is blurrier)
+        nf_blur = native_scale_fraction(blur.tampered[y:y + h, x:x + w])
+        nf_sharp = native_scale_fraction(sharp.tampered[y:y + h, x:x + w])
+        assert nf_blur < nf_sharp
+
 
 class TestMetrics:
     def test_perfect_overlap(self):

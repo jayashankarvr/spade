@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 # Bump on any breaking change to the structure below.
-SCHEMA_VERSION = "1.0"
+# 1.1: added top-level "cues" (image-level forensic signals) + result.localization.
+SCHEMA_VERSION = "1.1"
 
 # Config fields worth recording for reproducibility (kept deliberately small and
 # forensically relevant rather than dumping the whole Config).
@@ -171,6 +172,27 @@ def build_report(
             "detection_score": round(loc.area_fraction, 6),
         }
 
+    # Image-level forensic cues, independent of the match. Computed on the source
+    # (suspected tampered) image. Currently: resize/resampling inconsistency.
+    cues: Optional[Dict[str, Any]] = None
+    if source_image is not None:
+        from spade.scale import scale_inconsistency
+
+        si = scale_inconsistency(source_image)
+        cues = {
+            "scale_inconsistency": {
+                "score": round(si.score, 6),
+                "min_native_fraction": round(si.min_fraction, 4),
+                "median_native_fraction": round(si.median_fraction, 4),
+                "anomaly_bbox": {
+                    "x": si.anomaly_bbox[0],
+                    "y": si.anomaly_bbox[1],
+                    "width": si.anomaly_bbox[2],
+                    "height": si.anomaly_bbox[3],
+                },
+            }
+        }
+
     regions: List[Dict[str, Any]] = []
     for region in result.coherent_regions:
         regions.append(
@@ -202,6 +224,7 @@ def build_report(
             "coherent_regions": regions,
             "stats": dict(result.stats),
         },
+        "cues": cues,
         "artifacts": {"heatmap": heatmap_path},
     }
 
