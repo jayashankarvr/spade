@@ -1,6 +1,6 @@
 # SPADE
 
-Sub-Patch Analysis & Detection Engine - finds tiny image fragments (3×3 to 6×6 pixels) in large image collections, even after color shifts, compression, or editing.
+Sub-Patch Analysis & Detection Engine - finds tiny image fragments (3x3 to 6x6 pixels) in large image collections, even after color shifts, compression, or editing.
 
 ## Install
 
@@ -134,7 +134,7 @@ from spade import ForensicsEngine, Config
 # Enable multi-scale pyramid for scale-invariant matching
 config = Config(
     pyramid_enabled=True,
-    pyramid_scales=[1.0, 0.5, 0.25, 0.125],  # 1×, 0.5×, 0.25×, 0.125×
+    pyramid_scales=[1.0, 0.5, 0.25, 0.125],  # 1x, 0.5x, 0.25x, 0.125x
     pyramid_min_size=16,                      # Min dimension at smallest scale
 )
 
@@ -178,7 +178,7 @@ for img_path in source_dir.glob("*.jpg"):
 
 # Print summary
 for r in sorted(results, key=lambda x: x["probability"], reverse=True):
-    print(f"{r['source']} → {r['target']}: {r['probability']:.3f}")
+    print(f"{r['source']} -> {r['target']}: {r['probability']:.3f}")
 ```
 
 #### Heatmap Visualization
@@ -427,7 +427,7 @@ config = Config(
 )
 
 engine = ForensicsEngine(config)
-# 5-10× speedup on large indexes (>1M vectors)
+# 5-10x speedup on large indexes (>1M vectors)
 ```
 
 #### GPU Acceleration
@@ -439,7 +439,7 @@ config = Config(
 )
 
 engine = ForensicsEngine(config)
-# 2-5× speedup for patch extraction and search
+# 2-5x speedup for patch extraction and search
 ```
 
 #### Distributed Sharding (Scale-Out)
@@ -522,7 +522,7 @@ ruff check src/
 ## Roadmap
 
 **Done (Phase 1)**
-- 3×3 to 6×6 patches with spatial pooling
+- 3x3 to 6x6 patches with spatial pooling
 - Entropy filtering (adaptive bins)
 - Huber loss verification (robust to JPEG)
 - Auto PCA training

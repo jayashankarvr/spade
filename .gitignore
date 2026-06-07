@@ -97,7 +97,7 @@ dmypy.json
 *.swo
 *~
 
-# Internal/dev docs — kept local, not published
+# Internal/dev docs - kept local, not published
 _internal/
 
 # SPADE specific

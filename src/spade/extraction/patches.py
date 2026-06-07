@@ -31,7 +31,7 @@ class PatchExtractor:
     """
     Extracts patches from images with optional entropy filtering.
 
-    Uses numpy stride tricks for efficient extraction (10-100× faster).
+    Uses numpy stride tricks for efficient extraction (10-100x faster).
     Entropy filtering removes low-information patches (uniform regions like
     sky or walls) which reduces false positives and improves performance.
     """
@@ -45,7 +45,7 @@ class PatchExtractor:
     ):
         """
         Args:
-            size: Patch size (e.g., 3 for 3×3)
+            size: Patch size (e.g., 3 for 3x3)
             stride: Extraction stride
             entropy_threshold: Minimum entropy to keep patch (None to disable)
             use_gpu: Use GPU acceleration if available (requires CuPy)

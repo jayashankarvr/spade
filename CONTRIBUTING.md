@@ -16,7 +16,7 @@ pytest
 ## Workflow
 
 `main` is the integration branch and is protected. External contributors don't
-push directly — open a pull request from a fork:
+push directly - open a pull request from a fork:
 
 1. **Fork** this repository and clone your fork.
 2. Create a topic branch: `git checkout -b my-change`.
@@ -39,7 +39,7 @@ push directly — open a pull request from a fork:
 
 ## Scope and direction
 
-Before proposing a large feature, please read [ROADMAP.md](ROADMAP.md) — it
+Before proposing a large feature, please read [ROADMAP.md](ROADMAP.md) - it
 describes where the project is headed and, importantly, what is intentionally
 **out of scope**. Issues and PRs that align with the roadmap are easiest to land.
 

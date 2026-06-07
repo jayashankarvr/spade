@@ -36,7 +36,7 @@ class ProbabilityModel:
         if dof <= 0 or rss < 0:
             return 0.0
 
-        # Under null hypothesis: RSS/σ² ~ χ²(dof)
+        # Under null hypothesis: RSS/σ^2 ~ χ^2(dof)
         variance = self.noise_sigma ** 2
         test_stat = rss / variance
 
@@ -50,10 +50,10 @@ class ProbabilityModel:
         """
         Compute degrees of freedom for a patch size.
 
-        Formula: dof = (patch_size² × 3 channels) - 12 affine params
-        The 12 params are: 3×3 matrix M + 3×1 bias b
+        Formula: dof = (patch_size^2 x 3 channels) - 12 affine params
+        The 12 params are: 3x3 matrix M + 3x1 bias b
 
         Examples:
-            3×3 -> 15, 4×4 -> 36, 5×5 -> 63, 6×6 -> 96
+            3x3 -> 15, 4x4 -> 36, 5x5 -> 63, 6x6 -> 96
         """
         return max(1, patch_size ** 2 * 3 - 12)

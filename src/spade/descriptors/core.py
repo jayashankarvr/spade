@@ -164,7 +164,7 @@ class GradientHistogramDescriptor(DescriptorStrategy):
 class CompositeDescriptor(DescriptorStrategy):
     """
     Combines multiple descriptor strategies and projects to target dimension.
-    For patches larger than 3×3, uses spatial pooling of 3×3 subpatches.
+    For patches larger than 3x3, uses spatial pooling of 3x3 subpatches.
     """
 
     def __init__(

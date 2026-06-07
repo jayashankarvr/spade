@@ -2,8 +2,8 @@
 
 SPADE's dense 3x3 matching produces true matches concentrated on the (contiguous)
 spliced region plus scattered false matches on coincidentally-similar background.
-A spatial-density filter — keep the largest connected component of the matched
-footprints — removes the scattered false positives while preserving the region.
+A spatial-density filter - keep the largest connected component of the matched
+footprints - removes the scattered false positives while preserving the region.
 
 Empirically this is the single biggest precision lever: on synthetic recolored
 splices it lifts precision ~0.40 -> ~0.73 and IoU ~0.38 -> ~0.69 with negligible
@@ -87,7 +87,7 @@ class Localization:
     mask: np.ndarray                       # bool (H, W) predicted splice mask
     bbox: Tuple[int, int, int, int]        # (x, y, w, h) of the mask
     area: int                              # mask pixel count
-    area_fraction: float                   # area / (H * W) — the detection score in [0, 1]
+    area_fraction: float                   # area / (H * W) - the detection score in [0, 1]
 
 
 def localize_region(

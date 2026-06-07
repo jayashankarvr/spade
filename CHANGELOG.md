@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Image Pyramids**: Multi-scale analysis with configurable pyramid levels (1×, 0.5×, 0.25×, 0.125×) for scale-invariant matching
+- **Image Pyramids**: Multi-scale analysis with configurable pyramid levels (1x, 0.5x, 0.25x, 0.125x) for scale-invariant matching
 - **256-dimensional descriptors**: Upgraded from 128-dim for better discrimination
 - **LSH Pre-filtering**: Optional Locality Sensitive Hashing for sublinear search time on large indexes (requires `datasketch`)
 - **REST API**: FastAPI-based web service with endpoints for indexing, matching, and target management
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI commands: `match`, `index`, `search`
 - Python API via `ForensicsEngine`
 - Auto-train PCA for descriptor dimensionality reduction
-- Support for patch sizes 3×3 through 6×6
+- Support for patch sizes 3x3 through 6x6
 - JSON metadata storage (secure, replaces pickle)
 
 ### Technical Details

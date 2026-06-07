@@ -95,7 +95,7 @@ docs:
 
 # Quick checks before commit
 check: format lint test
-	@echo "✅ All checks passed!"
+	@echo " All checks passed!"
 
 # Version bump helpers
 version:

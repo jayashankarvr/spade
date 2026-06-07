@@ -5,13 +5,13 @@ downsampled before it starts losing information?* Below its native resolution,
 downsample+upsample can no longer reconstruct it (round-trip error rises); at or
 above native, it's near-lossless. The knee in that error curve is the native scale.
 
-1. ``native_scale_fraction`` — estimate an image's native resolution as a fraction
+1. ``native_scale_fraction`` - estimate an image's native resolution as a fraction
    of its current size (1.0 = already native; 0.5 = was ~2x upscaled). Useful for
    normalizing two images to a common detail scale before matching.
 
-2. ``scale_inconsistency_map`` — a sliding-window native-scale map. A spliced region
+2. ``scale_inconsistency_map`` - a sliding-window native-scale map. A spliced region
    that was resized before pasting has a *different* native scale than the host, so
-   it stands out — an independent forensic cue (cf. resampling detection), complementary
+   it stands out - an independent forensic cue (cf. resampling detection), complementary
    to SPADE's color-transform evidence.
 
 Note: the knee is sharp for native and moderate upscaling (~2x), softer for heavy

@@ -6,8 +6,8 @@ compared (input file hashes + shapes), *how* (tool version + config), and the
 *result* (localization, the recovered affine color transform, and a calibrated
 chi-square probability).
 
-Everything downstream — the benchmark harness, the CLI/API, third-party
-integrations — should consume this schema rather than SPADE's in-memory objects.
+Everything downstream - the benchmark harness, the CLI/API, third-party
+integrations - should consume this schema rather than SPADE's in-memory objects.
 """
 
 from __future__ import annotations

@@ -32,7 +32,7 @@ class ImagePyramid:
     """
     Multi-resolution image pyramid for scale-invariant matching.
 
-    Creates pyramid levels at powers of 2 downscaling (1×, 0.5×, 0.25×, 0.125×).
+    Creates pyramid levels at powers of 2 downscaling (1x, 0.5x, 0.25x, 0.125x).
     Patches extracted at lower levels correspond to larger regions in the original.
     """
 
@@ -161,7 +161,7 @@ def compute_effective_patch_size(patch_size: int, scale: float) -> float:
     """
     Compute effective patch size in original image coordinates.
 
-    A 3×3 patch at scale 0.5 covers a 6×6 region in the original image.
+    A 3x3 patch at scale 0.5 covers a 6x6 region in the original image.
 
     Args:
         patch_size: Base patch size

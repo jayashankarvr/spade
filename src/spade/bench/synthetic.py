@@ -3,11 +3,11 @@
 The forensic task SPADE targets: a region cut from a *donor* image is
 recolored (affine color transform) and spliced into a different *host* image.
 We generate that scenario and know exactly where the splice is and what
-transform was applied — perfect ground truth for benchmarking, and full control
+transform was applied - perfect ground truth for benchmarking, and full control
 over the axes that matter (splice size, color-grade strength, JPEG quality).
 
-A `SpliceSample` gives a detector two inputs — the `donor` (reference) and the
-`tampered` image — and asks: where, in `tampered`, is the spliced region?
+A `SpliceSample` gives a detector two inputs - the `donor` (reference) and the
+`tampered` image - and asks: where, in `tampered`, is the spliced region?
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _textured_image(rng: np.random.RandomState, h: int, w: int) -> np.ndarray:
     A realistic benchmark must be fair to *both* dense (SPADE) and keypoint
     (SIFT/ORB) methods. Pure smoothed noise is too feature-poor for keypoint
     detectors; we add a 1/f spectrum (energy at all scales) and random hard-edged
-    blobs (corners/edges) so detectors like SIFT find ample keypoints — making
+    blobs (corners/edges) so detectors like SIFT find ample keypoints - making
     any remaining difficulty on small fragments a genuine result, not an artifact.
     """
     from scipy.ndimage import gaussian_filter

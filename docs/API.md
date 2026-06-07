@@ -601,7 +601,7 @@ if (result.heatmap_base64) {
 
 1. **Increase stride**: Fewer patches, faster indexing
    ```bash
-   export SPADE_STRIDE=2  # 4× fewer patches
+   export SPADE_STRIDE=2  # 4x fewer patches
    ```
 
 2. **Increase entropy threshold**: More aggressive filtering
