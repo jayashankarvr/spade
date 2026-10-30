@@ -1,10 +1,3 @@
-from spade.descriptors.core import DescriptorStrategy, CompositeDescriptor
+from spade.descriptors.core import LuminanceDescriptor
 
-# Optional: LearnedDescriptor requires PyTorch
-try:
-    from spade.descriptors.learned import LearnedDescriptor, TORCH_AVAILABLE
-except ImportError:
-    LearnedDescriptor = None
-    TORCH_AVAILABLE = False
-
-__all__ = ["DescriptorStrategy", "CompositeDescriptor", "LearnedDescriptor", "TORCH_AVAILABLE"]
+__all__ = ["LuminanceDescriptor"]

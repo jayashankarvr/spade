@@ -22,13 +22,7 @@ def main():
     source = create_test_image(80, 80, seed=123)
     source[20:40, 25:45] = fragment
 
-    # Configure and run SPADE
-    config = Config(
-        patch_size=3,
-        entropy_threshold=2.0,
-        min_probability=0.5,
-    )
-    engine = ForensicsEngine(config)
+    engine = ForensicsEngine(Config(patch_size=5))
 
     # Index the target
     num_patches = engine.index_target(target, "target_001")
@@ -40,11 +34,15 @@ def main():
     print(f"\nSource patches analyzed: {result.stats['source_patches']}")
     print(f"Matches found: {result.stats['total_matches']}")
 
-    if result.best_match:
-        print(f"\nBest match:")
-        print(f"  Probability: {result.best_match.probability:.3f}")
-        print(f"  Source location: {result.best_match.source_coord}")
-        print(f"  Target location: {result.best_match.target_coord}")
+    # Individual patch matches are weak evidence; regions are what count.
+    for region in result.significant_regions:
+        print(f"\nCopied region from {region.image_id}:")
+        print(f"  Source bbox (x, y, w, h): {region.source_bbox}")
+        print(f"  Target bbox (x, y, w, h): {region.target_bbox}")
+        print(f"  Patches agreeing: {len(region.matches)}")
+        print(f"  log10 NFA: {region.log10_nfa:.1f}  (expected false alarms: 10^{region.log10_nfa:.1f})")
+    if not result.significant_regions:
+        print("\nNo significant copied region found.")
 
 
 if __name__ == "__main__":

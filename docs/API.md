@@ -45,14 +45,12 @@ make serve
 curl http://localhost:8000/health
 
 # Index a target image
-curl -X POST http://localhost:8000/index \
-  -F "file=@target.jpg" \
-  -F "image_id=target_001"
+curl -X POST "http://localhost:8000/index?image_id=target_001" \
+  -F "file=@target.jpg"
 
 # Match a source image
-curl -X POST http://localhost:8000/match \
-  -F "file=@source.jpg" \
-  -F "return_heatmap=true"
+curl -X POST "http://localhost:8000/match?return_heatmap=true" \
+  -F "file=@source.jpg"
 ```
 
 ---
@@ -147,15 +145,12 @@ Comprehensive health check with detailed metrics.
   "index": {
     "size": 1500000,
     "target_count": 42,
-    "target_ids": ["img_0000", "img_0001", "..."]
+    "target_ids": ["img_3f9c2a1b7d04", "..."]
   },
   "config": {
-    "patch_size": 3,
-    "descriptor_dim": 256,
+    "patch_size": 5,
     "pyramid_enabled": false,
-    "lsh_enabled": false,
-    "coherence_enabled": true,
-    "use_gpu": false
+    "coherence_enabled": true
   },
   "memory": {
     "rss_mb": 2048.5,
@@ -180,13 +175,14 @@ Get current engine configuration.
 **Response:**
 ```json
 {
-  "patch_size": 3,
+  "patch_size": 5,
   "stride": 1,
-  "entropy_threshold": 2.5,
-  "descriptor_dim": 256,
-  "min_probability": 0.5,
+  "entropy_threshold": null,
+  "k_neighbors": 8,
+  "distance_threshold": 0.5,
+  "min_probability": 0.01,
+  "max_nfa": 1.0,
   "pyramid_enabled": false,
-  "lsh_enabled": false,
   "coherence_enabled": true
 }
 ```
@@ -206,8 +202,9 @@ Index a target image for later matching.
 - **Method**: `POST`
 - **Content-Type**: `multipart/form-data`
 - **Parameters**:
-  - `file` (required): Image file (JPEG, PNG, BMP, TIFF, WEBP)
-  - `image_id` (optional): Unique identifier (alphanumeric + `._-`)
+  - `file` (required, form field): Image file (JPEG, PNG, BMP, TIFF, WEBP)
+  - `image_id` (optional, query parameter): Unique identifier (alphanumeric + `._-`).
+    If omitted a random `img_<hex>` id is generated.
 
 **Limits:**
 - Max file size: 50MB
@@ -216,9 +213,8 @@ Index a target image for later matching.
 
 **Example:**
 ```bash
-curl -X POST http://localhost:8000/index \
-  -F "file=@target.jpg" \
-  -F "image_id=suspect_photo_001"
+curl -X POST "http://localhost:8000/index?image_id=suspect_photo_001" \
+  -F "file=@target.jpg"
 ```
 
 **Response:**
@@ -277,7 +273,7 @@ List all indexed target images.
 
 #### `DELETE /targets/{image_id}`
 
-Remove a target from the index.
+Remove a target and its descriptors from the index.
 
 **Parameters:**
 - `image_id` (path): Target identifier
@@ -291,16 +287,13 @@ curl -X DELETE http://localhost:8000/targets/suspect_photo_001
 ```json
 {
   "success": true,
-  "message": "Removed target suspect_photo_001",
-  "note": "Descriptors remain in FAISS index but won't match"
+  "message": "Removed target suspect_photo_001"
 }
 ```
 
 **Status Codes:**
 - `200 OK`: Target removed
 - `404 Not Found`: Target does not exist
-
-**Important**: This operation is metadata-only. Descriptors remain in FAISS for performance reasons but won't be returned in future searches.
 
 ---
 
@@ -314,35 +307,37 @@ Match a source image against indexed targets.
 - **Method**: `POST`
 - **Content-Type**: `multipart/form-data`
 - **Parameters**:
-  - `file` (required): Source image file
-  - `target_ids` (optional): Comma-separated target IDs to search
-  - `return_heatmap` (optional): Include base64-encoded heatmap (default: false)
+  - `file` (required, form field): Source image file
+  - `target_ids` (optional, query parameter): Comma-separated target IDs to search
+  - `return_heatmap` (optional, query parameter): Include base64-encoded heatmap (default: false)
 
 **Example:**
 ```bash
-curl -X POST http://localhost:8000/match \
-  -F "file=@fragment.jpg" \
-  -F "target_ids=suspect_photo_001,suspect_photo_002" \
-  -F "return_heatmap=true"
+curl -X POST "http://localhost:8000/match?target_ids=suspect_photo_001,suspect_photo_002&return_heatmap=true" \
+  -F "file=@fragment.jpg"
 ```
 
 **Response:**
 ```json
 {
   "success": true,
+  "detected": true,
   "best_match": {
     "source_coord": {"x": 100, "y": 200},
     "target_coord": {"x": 450, "y": 680},
-    "patch_size": 3,
-    "probability": 0.95,
+    "patch_size": 5,
+    "fit_p_value": 0.83,
     "image_id": "suspect_photo_001"
   },
   "total_matches": 2458,
   "coherent_regions": [
     {
       "offset": {"x": 350, "y": 480},
+      "image_id": "suspect_photo_001",
       "num_matches": 156,
       "confidence": 0.92,
+      "log10_nfa": -14.2,
+      "significant": true,
       "source_bbox": {"x": 0, "y": 0, "width": 200, "height": 300},
       "target_bbox": {"x": 350, "y": 480, "width": 200, "height": 300}
     }
@@ -350,24 +345,31 @@ curl -X POST http://localhost:8000/match \
   "stats": {
     "source_patches": 123456,
     "total_matches": 2458,
-    "coherent_regions": 1
+    "coherent_regions": 1,
+    "significant_regions": 1
   },
   "heatmap_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
 }
 ```
 
 **Response Fields:**
-- `best_match`: Highest probability match (null if no matches)
+- `detected`: true if any region is significant (NFA < `max_nfa`)
+- `best_match`: Best patch match of the most significant region (null if no matches)
   - `source_coord`: (x, y) in source image
   - `target_coord`: (x, y) in target image
   - `patch_size`: Size of matched patch
-  - `probability`: Match confidence [0, 1]
+  - `fit_p_value`: Per-patch chi-square goodness of fit. Not a match
+    probability: small patches fit each other by chance all the time
   - `image_id`: Target image identifier
-- `total_matches`: Number of candidate matches found
-- `coherent_regions`: Spatially consistent match clusters
-  - `offset`: (dx, dy) transformation offset
-  - `num_matches`: Matches in this region
-  - `confidence`: Region confidence score
+- `total_matches`: Number of per-patch matches that passed the pre-filter
+- `coherent_regions`: Clusters of matches sharing one offset, most significant first
+  - `offset`: (dx, dy) from source to target
+  - `image_id`: Target image the region was copied from
+  - `num_matches`: Patches consistent with the region's color transform
+  - `log10_nfa`: log10 of the expected number of regions this good with no
+    copy present. Negative = less than one expected by chance
+  - `significant`: `log10_nfa` below `log10(max_nfa)`
+  - `confidence`: Ranking heuristic (mean fit p-value x log2 size)
   - `source_bbox`/`target_bbox`: Bounding boxes (x, y, width, height)
 - `stats`: Search statistics
 - `heatmap_base64`: Base64-encoded PNG heatmap (if requested)
@@ -473,8 +475,8 @@ API_BASE = "http://localhost:8000"
 with open("target.jpg", "rb") as f:
     response = requests.post(
         f"{API_BASE}/index",
+        params={"image_id": "target_001"},
         files={"file": f},
-        data={"image_id": "target_001"}
     )
     print(response.json())
 
@@ -482,20 +484,17 @@ with open("target.jpg", "rb") as f:
 with open("source.jpg", "rb") as f:
     response = requests.post(
         f"{API_BASE}/match",
+        params={"target_ids": "target_001", "return_heatmap": "true"},
         files={"file": f},
-        data={
-            "target_ids": "target_001",
-            "return_heatmap": "true"
-        }
     )
     result = response.json()
 
-    if result["best_match"]:
-        match = result["best_match"]
-        print(f"Found match in {match['image_id']}")
-        print(f"Source: ({match['source_coord']['x']}, {match['source_coord']['y']})")
-        print(f"Target: ({match['target_coord']['x']}, {match['target_coord']['y']})")
-        print(f"Probability: {match['probability']:.2f}")
+    for region in result["coherent_regions"]:
+        if region["significant"]:
+            print(f"Copied from {region['image_id']}")
+            print(f"  source bbox: {region['source_bbox']}")
+            print(f"  target bbox: {region['target_bbox']}")
+            print(f"  log10 NFA: {region['log10_nfa']:.1f}")
 
     # Save heatmap
     if result["heatmap_base64"]:
@@ -523,17 +522,15 @@ print(response.json())
 ```bash
 for img in targets/*.jpg; do
   id=$(basename "$img" .jpg)
-  curl -X POST http://localhost:8000/index \
-    -F "file=@$img" \
-    -F "image_id=$id"
+  curl -X POST "http://localhost:8000/index?image_id=$id" \
+    -F "file=@$img"
 done
 ```
 
 **Match with Specific Targets:**
 ```bash
-curl -X POST http://localhost:8000/match \
-  -F "file=@source.jpg" \
-  -F "target_ids=img_001,img_002,img_003"
+curl -X POST "http://localhost:8000/match?target_ids=img_001,img_002,img_003" \
+  -F "file=@source.jpg"
 ```
 
 **Health Check Loop:**
@@ -551,9 +548,9 @@ done
 async function indexImage(file, imageId) {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('image_id', imageId);
 
-  const response = await fetch('http://localhost:8000/index', {
+  const url = `http://localhost:8000/index?image_id=${encodeURIComponent(imageId)}`;
+  const response = await fetch(url, {
     method: 'POST',
     body: formData
   });
@@ -565,12 +562,12 @@ async function indexImage(file, imageId) {
 async function matchImage(file, targetIds = null, returnHeatmap = false) {
   const formData = new FormData();
   formData.append('file', file);
+  const params = new URLSearchParams({ return_heatmap: returnHeatmap.toString() });
   if (targetIds) {
-    formData.append('target_ids', targetIds.join(','));
+    params.set('target_ids', targetIds.join(','));
   }
-  formData.append('return_heatmap', returnHeatmap.toString());
 
-  const response = await fetch('http://localhost:8000/match', {
+  const response = await fetch(`http://localhost:8000/match?${params}`, {
     method: 'POST',
     body: formData
   });
@@ -583,7 +580,7 @@ const fileInput = document.getElementById('file-input');
 const file = fileInput.files[0];
 
 const result = await matchImage(file, ['target_001'], true);
-console.log('Best match:', result.best_match);
+console.log('Detected:', result.detected, result.coherent_regions);
 
 // Display heatmap
 if (result.heatmap_base64) {
@@ -604,20 +601,18 @@ if (result.heatmap_base64) {
    export SPADE_STRIDE=2  # 4x fewer patches
    ```
 
-2. **Increase entropy threshold**: More aggressive filtering
+2. **Set an entropy threshold**: drop weakly textured patches (bits; must be
+   below log2(8) = 3 for the 8-bin histogram, or nothing passes)
    ```bash
-   export SPADE_ENTROPY_THRESHOLD=3.0
-   ```
-
-3. **Enable LSH pre-filtering**: Faster search on large indexes
-   ```bash
-   pip install datasketch
-   export SPADE_LSH_ENABLED=true
+   export SPADE_ENTROPY_THRESHOLD=2.0
    ```
 
 ### Concurrent Requests
 
-The API supports concurrent requests via threading:
+Index, match and delete run in a worker thread, so the server stays responsive
+(health checks keep answering). They take turns on the engine, so throughput
+doesn't grow with client concurrency; run more replicas for that. Client-side
+concurrency still works:
 
 ```python
 import concurrent.futures
@@ -645,7 +640,8 @@ Set maximum target limit to prevent memory exhaustion:
 export SPADE_MAX_TARGETS=100
 ```
 
-When limit is reached, least-recently-used targets are automatically evicted.
+When the limit is reached, the least recently indexed targets are evicted and
+their descriptors removed from the index.
 
 ---
 

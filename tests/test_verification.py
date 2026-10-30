@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from spade.verification.affine import AffineVerifier, VerificationResult
+from spade.verification.affine import AffineVerifier, VerificationResult, fit_gain_offset_batch
 from spade.verification.probability import ProbabilityModel
 
 
@@ -139,3 +139,37 @@ class TestProbabilityModel:
 
         assert model.compute(rss=-1, dof=15) == 0.0
         assert model.compute(rss=0.1, dof=0) == 0.0
+
+
+class TestGainOffsetBatch:
+    def test_exact_fit_has_zero_residual(self):
+        rng = np.random.RandomState(0)
+        src = rng.rand(10, 25)
+        tgt = 1.3 * src - 0.1
+        rss = fit_gain_offset_batch(src, tgt, np.ones_like(src))
+        np.testing.assert_allclose(rss, 0.0, atol=1e-12)
+
+    def test_zero_weight_ignores_outlier(self):
+        rng = np.random.RandomState(1)
+        src = rng.rand(1, 25)
+        tgt = 0.8 * src + 0.05
+        tgt[0, 3] = 5.0
+        weights = np.ones_like(src)
+        assert fit_gain_offset_batch(src, tgt, weights)[0] > 1.0
+        weights[0, 3] = 0.0
+        assert fit_gain_offset_batch(src, tgt, weights)[0] == pytest.approx(0.0, abs=1e-12)
+
+
+class TestProbabilityVectorized:
+    def test_array_input_matches_scalar(self):
+        model = ProbabilityModel(noise_sigma=0.02)
+        rss = np.array([0.001, 0.01, 0.1])
+        dof = np.array([15, 20, 25])
+        out = model.compute(rss, dof)
+        for r, d, p in zip(rss, dof, out):
+            assert p == pytest.approx(model.compute(float(r), int(d)))
+
+    def test_tail_precision(self):
+        # 1 - cdf rounds to 0 long before the survival function does.
+        p = ProbabilityModel(noise_sigma=0.02).compute(0.05, 15)
+        assert 0.0 < p < 1e-17

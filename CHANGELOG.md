@@ -7,14 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release reworks the matching pipeline. On the synthetic benchmark
+(`python -m spade.bench.runner --n 20 --negatives 20`) localization IoU goes from
+0.48 to 0.85, detection AUC from 0.74 to 0.96, and time per image from 41 s to
+0.6 s. With JPEG q85 it reaches IoU 0.78 / AUC 0.95.
+
+### Fixed
+- **Targets indexed before PCA training were unmatchable.** PCA was fitted part-way through indexing, so earlier targets kept random-projection descriptors while queries used PCA. The descriptor no longer has any trained state.
+- **`spade index` + `spade search` compared descriptors from different spaces**, because the trained projection wasn't saved with the index. Indexes are now saved as a bundle (`ForensicsEngine.save` / `ForensicsEngine.load`) that includes the config.
+- **Deleting a target didn't delete anything.** `remove_target`, LRU eviction and `DELETE /targets/{id}` left the vectors in FAISS, where they kept using nearest-neighbour slots. The index now uses `IndexIDMap2` and really removes them.
+- **The default entropy filter dropped most patches**, and values of 3.0 or more (as in the old README) dropped all of them, because a 3x3 patch can't reach 3 bits with 8 bins. Entropy filtering is now off by default, and an unreachable threshold is rejected.
+- **Per-patch "probability" decided matches**, but a 12-parameter color fit on 27 numbers passes for about half of unrelated textured 3x3 pairs. Decisions are now made per region (see NFA below). The JSON report renames the field to `fit_p_value`.
+- **Recolors that clip at 0 or 255** broke the affine model on exactly the copied pixels. Clipped pixel pairs are now left out of the fits and tests.
+- **Coherent regions mixed target images** (one offset across different targets formed one cluster) and could chain slowly drifting offsets into one huge cluster. Regions are now formed per target and per pyramid scale, around offset peaks.
+- The chi-square tail used `1 - cdf`, which rounds to 0 long before the true value. It now uses the survival function.
+- The REST API ran indexing and matching on the event loop, which blocked health checks; they now run in a worker thread. Auto-generated image ids (`img_{count}`) collided after deletions; they're now random.
+- Index files are written with `os.replace` from the same directory (actually atomic). The old version deleted the existing files first, and loading still supported pickle.
+- API docs and README sent `image_id`, `target_ids` and `return_heatmap` as form fields, which the API ignored; they're query parameters.
+
 ### Added
+- **Region-level verification with an a-contrario NFA** (`spade.verification.nfa`). Each cluster gets one 3x3 color transform fitted over all its pixels, keeps the patches that agree with it, and is scored by its Number of False Alarms. `MatchResult.significant_regions`, `CoherentRegion.log10_nfa`, `.significant`, `.color_M`, `.color_b`, `Config.max_nfa`.
+- `MatchResult.localization`: footprint of the significant regions in source coordinates.
+- `Match.target_scale`: pyramid level a match came from. Pyramid matches cluster in that level's coordinates, so downscaled copies form proper regions.
+- `ANNIndex.remove`, batched `ANNIndex.search`.
+
+### Changed
+- **Descriptor**: normalized luminance pattern (`LuminanceDescriptor`), vectorized. It replaces the five-part composite plus 256-d random projection or PCA. It beat the composite under JPEG in the comparison behind this change and costs far less. Flat patches are always dropped.
+- The per-patch pre-filter fits grey-level gain and offset (2 parameters) in one batched call instead of a Python IRLS loop per candidate.
+- Defaults chosen by benchmark: `patch_size=5`, `k_neighbors=8`, `distance_threshold=0.5`, `min_probability=0.01`, `entropy_threshold=None`.
+- JSON report schema 2.0: `fit_p_value`, per-region `log10_nfa` and `significant`, `result.detected`; `localization.detection_score` is now `-log10(NFA)` of the best region (area moved to `area_fraction`).
+- Heatmaps paint each match's footprint instead of a single pixel.
+- Entropy is computed with one `bincount` instead of a per-patch loop.
+- CLI: `spade index -o PREFIX` writes a bundle; `spade search` loads it and reloads patches from the indexed files. `match`/`search` print significant regions with their NFA.
+
+### Removed
+- **Bayes-factor pipeline** (`scoring_mode="bayes"`: `engine_bayes`, Bayes-factor scorer, natural-image priors, 4-D Hough, persistence peaks, loopy BP, RG-trajectory term, Zernike and persistence descriptors, `scripts/train_priors.py`, `scripts/benchmark.py`, `scripts/synthetic_corpus.py`). The "calibrated" Bayes factor compared densities from different spaces with no Occam penalty, its BP graph construction was quadratic in Python, and the NFA replaces it.
+- **LSH pre-filter** (`HybridIndex`, `datasketch`): MinHash/Jaccard is the wrong similarity for real-valued vectors, and exact FAISS search on 25-dimensional descriptors is faster anyway.
+- **`ShardedIndex`**: local mode spun up a thread pool per query patch, and remote mode had no server to talk to.
+- **`LearnedDescriptor`** (ImageNet ResNet on upscaled 3x3 patches; no photometric invariance) and the `learned`/`phase3` extras.
+- **GPU path** (`spade.acceleration`, `use_gpu`): only the entropy step ran on the GPU.
+- Config fields `descriptor_dim`, `descriptor_spatial_pooling`, `auto_train_pca`, `pca_train_samples`, `scale_weights`, `lsh_*`, `use_gpu`, `use_learned_descriptors`, `learned_model`, `distributed_enabled`, `num_shards`, `scoring_mode`, `aggregation_mode`, `priors_dir`. `SpatialAggregator.find_regions`, `SpatialCoherenceVerifier(min_cluster_probability=...)`.
+- Index files from earlier versions can't be loaded (they were in a different descriptor space anyway); re-index.
+
+### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
 - **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.
 - **Spatial-density localization** (`spade.aggregation.localize`): keep the largest connected component of the matched footprints; the component's area fraction is the image-level detection score.
 - **Larger-patch support**: `Config.descriptor_spatial_pooling` (compute descriptors directly on the whole patch instead of pooling 3x3 sub-patches - much faster at larger sizes); `patch_size` range widened from 3-6 to 3-16.
 - **Benchmark harness** (`spade.bench`): synthetic recolored-splice generator, localization/detection metrics, RootSIFT+RANSAC baseline, and a runner (`python -m spade.bench.runner`). Requires the `bench` extra.
 
-### Changed
+### Changed (before the rework)
 - `Match` now carries the recovered affine color transform `(M, b)` (previously computed for scoring then discarded).
 - CLI `match`/`serve` `--patch-size` now accepts 3-16.
 

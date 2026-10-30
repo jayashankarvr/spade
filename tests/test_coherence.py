@@ -147,3 +147,37 @@ class TestSpatialCoherence:
         # Should cluster despite slight offset difference
         assert len(regions) == 1
         assert len(regions[0].matches) == 2
+
+    def test_groups_per_target_image(self):
+        """Same offset in two different targets is two regions, not one."""
+        verifier = SpatialCoherenceVerifier(offset_tolerance=1, min_cluster_size=3)
+        matches = [
+            Match(source_coord=(i, 0), target_coord=(i + 5, 5), patch_size=3, probability=0.9, image_id=img)
+            for img in ("a", "b")
+            for i in range(3)
+        ]
+        regions = verifier.find_coherent_regions(matches)
+        assert sorted(r.image_id for r in regions) == ["a", "b"]
+        assert all(len(r.matches) == 3 for r in regions)
+
+    def test_drifting_offsets_do_not_chain(self):
+        """A slow offset drift used to merge into one cluster via neighbouring cells."""
+        verifier = SpatialCoherenceVerifier(offset_tolerance=1, min_cluster_size=2)
+        matches = [
+            Match(source_coord=(0, 0), target_coord=(dx, 0), patch_size=3, probability=0.9)
+            for dx in range(0, 40)
+            for _ in range(2)
+        ]
+        regions = verifier.find_coherent_regions(matches)
+        for region in regions:
+            offsets = {m.target_coord[0] - m.source_coord[0] for m in region.matches}
+            assert max(offsets) - min(offsets) <= 2
+
+    def test_region_not_significant_until_scored(self):
+        verifier = SpatialCoherenceVerifier(offset_tolerance=1, min_cluster_size=2)
+        matches = [
+            Match(source_coord=(i, 0), target_coord=(i + 1, 0), patch_size=3, probability=0.9)
+            for i in range(3)
+        ]
+        region = verifier.find_coherent_regions(matches)[0]
+        assert region.log10_nfa is None and not region.significant

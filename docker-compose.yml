@@ -16,15 +16,10 @@ services:
       # - ./images:/images:ro
     environment:
       # SPADE Configuration
-      - SPADE_PATCH_SIZE=3
-      - SPADE_DESCRIPTOR_DIM=256
-      - SPADE_MIN_PROBABILITY=0.5
+      - SPADE_PATCH_SIZE=5
+      - SPADE_MAX_NFA=1.0
       - SPADE_MAX_TARGETS=1000
       - SPADE_PYRAMID_ENABLED=false
-      - SPADE_LSH_ENABLED=false
-      - SPADE_COHERENCE_ENABLED=true
-      # Uncomment for GPU support (requires NVIDIA Docker)
-      # - SPADE_USE_GPU=true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
@@ -32,14 +27,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    # Uncomment for GPU support
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
   # Optional: Nginx reverse proxy
   nginx:

@@ -26,23 +26,16 @@ class Detector:
 
 
 class SpadeDetector(Detector):
-    """SPADE: index the donor, query with the tampered image, localize via the
-    source coordinates of spatially-coherent matches."""
+    """SPADE: index the donor, query with the tampered image, report the
+    significant regions (NFA < max_nfa) as the mask and -log10(NFA) of the best
+    region as the image-level score."""
 
     name = "spade"
 
     def __init__(self, config: Optional[object] = None):
         from spade.engine import Config
 
-        self.config = config or Config(
-            patch_size=8,                      # larger support: better precision, fewer verifications
-            descriptor_spatial_pooling=False,  # ~19x faster at 8x8, identical accuracy
-            entropy_threshold=None,
-            min_probability=0.5,
-            coherence_enabled=True,
-            coherence_min_cluster=3,
-            auto_train_pca=False,
-        )
+        self.config = config or Config()
 
     def detect(self, donor: np.ndarray, tampered: np.ndarray) -> Tuple[np.ndarray, float]:
         from spade.engine import ForensicsEngine
@@ -50,23 +43,12 @@ class SpadeDetector(Detector):
         h, w = tampered.shape[:2]
         engine = ForensicsEngine(self.config)
         if engine.index_target(donor, "donor") == 0:
-            return np.zeros((h, w), dtype=bool), 0.0
+            return np.zeros((h, w), dtype=bool), -1e9
 
         result = engine.match(tampered, return_heatmap=False)
-
-        # Prefer coherent-region matches (high precision); fall back to all matches.
-        if result.coherent_regions:
-            matches = [m for r in result.coherent_regions for m in r.matches]
-        else:
-            matches = result.matches
-
-        # Spatial-density localization: keep the largest connected component of
-        # the matched footprints. Its area fraction is the detection score
-        # (match counts are ~random; spatial structure discriminates).
-        from spade.aggregation.localize import localize_region
-
-        loc = localize_region(matches, (h, w), largest_component=True)
-        return loc.mask, loc.area_fraction
+        # No region at all ranks below any region; roc_auc_score rejects inf.
+        score = -result.coherent_regions[0].log10_nfa if result.coherent_regions else -1e9
+        return result.localization.mask, float(score)
 
 
 class RootSiftRansacDetector(Detector):

@@ -1,7 +1,7 @@
 """Benchmark runner: generate samples, run detectors, report numbers.
 
-This is the decision gate (ROADMAP section 8): run SPADE against the baselines
-on synthetic recolored splices and see where it actually stands.
+Runs SPADE against the baselines on synthetic recolored splices to see where it
+actually stands. Any change to matching defaults should be checked here.
 
 Usage:
     python -m spade.bench.runner --n 40 --grade 0.15

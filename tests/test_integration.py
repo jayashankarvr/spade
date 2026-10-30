@@ -1,183 +1,177 @@
-"""Integration tests for the full SPADE pipeline."""
+"""End-to-end tests for the matching pipeline, including regressions for past bugs."""
 
-import tempfile
 import numpy as np
 import pytest
 from PIL import Image
 
-from spade import ForensicsEngine, Config
+from spade import Config, ForensicsEngine
+from spade.bench.synthetic import make_negative_pair, make_recolored_splice
 from spade.engine import load_image
+from spade.exceptions import TargetExistsError
 
 
-class TestFullPipeline:
-    def test_exact_fragment_detection(self):
-        """Detect an exact copy of a fragment in a target image."""
-        np.random.seed(42)
-        # Create target image with distinct regions
-        target = np.zeros((100, 100, 3), dtype=np.float32)
-        target[20:40, 20:40, 0] = 0.8  # Red square
-        target[60:80, 60:80, 2] = 0.7  # Blue square
-        target += np.random.rand(100, 100, 3).astype(np.float32) * 0.1  # Noise
-
-        # Extract fragment from target
-        fragment = target[25:35, 25:35, :].copy()
-
-        engine = ForensicsEngine(Config(
-            patch_size=3,
-            entropy_threshold=None,  # Keep all patches for small test
-            min_probability=0.3,
-            auto_train_pca=False,  # Disable PCA for small test
-        ))
-
-        engine.index_target(target, "target")
-        result = engine.match(fragment)
-
-        assert result.stats["source_patches"] > 0
-        assert result.stats["total_matches"] > 0
-        assert result.best_match is not None
-        # Best match should be near the fragment location
-        x, y = result.best_match.target_coord
-        assert 15 <= x <= 45 and 15 <= y <= 45
-
-    def test_brightness_shifted_fragment(self):
-        """Detect fragment after brightness adjustment."""
-        np.random.seed(123)
-        target = np.random.rand(80, 80, 3).astype(np.float32) * 0.5 + 0.2
-        fragment = target[30:45, 30:45, :].copy()
-        fragment_bright = np.clip(fragment + 0.15, 0, 1)  # Brighten
-
-        engine = ForensicsEngine(Config(
-            patch_size=3,
-            entropy_threshold=None,
-            min_probability=0.3,
-            auto_train_pca=False,
-        ))
-
-        engine.index_target(target, "target")
-        result = engine.match(fragment_bright)
-
-        assert result.best_match is not None
-        x, y = result.best_match.target_coord
-        assert 20 <= x <= 55 and 20 <= y <= 55
-
-    def test_no_match_for_unrelated_images(self):
-        """No matches for completely different images."""
-        np.random.seed(42)
-        target = np.random.rand(50, 50, 3).astype(np.float32)
-        np.random.seed(123)
-        source = np.random.rand(20, 20, 3).astype(np.float32)
-
-        engine = ForensicsEngine(Config(
-            patch_size=3,
-            entropy_threshold=None,
-            min_probability=0.8,  # High threshold
-            auto_train_pca=False,
-        ))
-
-        engine.index_target(target, "target")
-        result = engine.match(source)
-
-        # Should have very few or no high-confidence matches
-        assert result.stats["total_matches"] < 5
-
-    def test_heatmap_generation(self):
-        """Heatmap is generated with correct shape."""
-        np.random.seed(42)
-        target = np.random.rand(60, 80, 3).astype(np.float32)
-        fragment = target[20:35, 30:50, :].copy()
-
-        engine = ForensicsEngine(Config(
-            patch_size=3,
-            entropy_threshold=None,
-            min_probability=0.3,
-            auto_train_pca=False,
-        ))
-
-        engine.index_target(target, "target")
-        result = engine.match(fragment, return_heatmap=True)
-
-        if result.best_match:
-            assert result.heatmap is not None
-            assert result.heatmap.shape == (60, 80)
-            assert result.heatmap.min() >= 0
-            assert result.heatmap.max() <= 1
-
-    def test_multiple_targets(self):
-        """Match against multiple indexed targets."""
-        np.random.seed(42)
-        target1 = np.random.rand(50, 50, 3).astype(np.float32)
-        np.random.seed(123)
-        target2 = np.random.rand(50, 50, 3).astype(np.float32)
-        fragment = target2[20:30, 20:30, :].copy()
-
-        engine = ForensicsEngine(Config(
-            patch_size=3,
-            entropy_threshold=None,
-            min_probability=0.3,
-            auto_train_pca=False,
-        ))
-
-        engine.index_target(target1, "target1")
-        engine.index_target(target2, "target2")
-        result = engine.match(fragment)
-
-        assert result.best_match is not None
-        assert result.best_match.image_id == "target2"
+@pytest.fixture(scope="module")
+def splice():
+    return make_recolored_splice(seed=0, image_size=96, fragment_size=24)
 
 
-class TestImageIO:
-    def test_load_and_match_from_files(self):
-        """Load images from files and run matching."""
-        np.random.seed(42)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create and save test images
-            target = (np.random.rand(100, 100, 3) * 255).astype(np.uint8)
-            source = target[40:60, 40:60, :].copy()
+def _true_offset(sample):
+    fx, fy, _, _ = sample.params["donor_region"]
+    x, y, _, _ = sample.bbox
+    return fx - x, fy - y
 
-            target_path = f"{tmpdir}/target.png"
-            source_path = f"{tmpdir}/source.png"
 
-            Image.fromarray(target).save(target_path)
-            Image.fromarray(source).save(source_path)
+def _iou(a, b):
+    return (a & b).sum() / max((a | b).sum(), 1)
 
-            # Load and match
-            target_img = load_image(target_path)
-            source_img = load_image(source_path)
 
-            engine = ForensicsEngine(Config(
-                patch_size=3,
-                entropy_threshold=None,
-                min_probability=0.3,
-                auto_train_pca=False,
-            ))
+class TestDetection:
+    def test_recolored_splice_found_and_localized(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        result = engine.match(splice.tampered)
 
-            engine.index_target(target_img, "target")
-            result = engine.match(source_img)
+        assert result.significant_regions
+        best = result.coherent_regions[0]
+        assert best.significant and best.image_id == "donor"
+        dx, dy = _true_offset(splice)
+        assert abs(best.offset[0] - dx) <= 2 and abs(best.offset[1] - dy) <= 2
+        assert _iou(result.localization.mask, splice.mask) > 0.7
 
-            assert result.stats["source_patches"] > 0
+    def test_region_recovers_color_transform(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        region = engine.match(splice.tampered).coherent_regions[0]
+        # The engine fits donor = M @ tampered + b, the inverse of the applied grade.
+        expected = np.linalg.inv(splice.color_M)
+        assert np.abs(region.color_M - expected).max() < 0.15
 
-    def test_index_save_and_load(self):
-        """Save and load index from disk."""
-        np.random.seed(42)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            target = np.random.rand(50, 50, 3).astype(np.float32)
+    def test_survives_jpeg(self):
+        sample = make_recolored_splice(seed=1, image_size=96, fragment_size=24, jpeg_quality=90)
+        engine = ForensicsEngine()
+        engine.index_target(sample.donor, "donor")
+        result = engine.match(sample.tampered)
+        assert result.significant_regions
+        assert _iou(result.localization.mask, sample.mask) > 0.5
 
-            engine = ForensicsEngine(Config(
-                patch_size=3,
-                entropy_threshold=None,
-                auto_train_pca=False,
-            ))
-            engine.index_target(target, "target")
+    def test_unrelated_images_not_significant(self):
+        # Per-patch matches between unrelated images are common; significant
+        # regions must not be. (Plain textures here: the benchmark's negatives
+        # contain hard-edged disks, and two disks of the same radius are
+        # pixel-identical shapes - a real, non-chance match.)
+        from scipy.ndimage import gaussian_filter
 
-            index_path = f"{tmpdir}/test_index"
-            engine.index.save(index_path)
+        rng = np.random.RandomState(0)
+        for _ in range(3):
+            donor, source = (
+                (np.clip(gaussian_filter(rng.rand(96, 96, 3), (1.5, 1.5, 0)) * 3 - 1, 0, 1) * 255).astype(np.uint8)
+                for _ in range(2)
+            )
+            engine = ForensicsEngine()
+            engine.index_target(donor, "donor")
+            result = engine.match(source)
+            assert result.matches  # plenty of chance patch matches...
+            assert not result.significant_regions  # ...but no significant region
+            assert not result.localization.mask.any()
 
-            # Load in new engine
-            engine2 = ForensicsEngine(Config(
-                patch_size=3,
-                entropy_threshold=None,
-                auto_train_pca=False,
-            ))
-            engine2.index.load(index_path)
+    def test_picks_the_right_target(self, splice):
+        other = make_negative_pair(seed=7, image_size=96).donor
+        engine = ForensicsEngine()
+        engine.index_target(other, "other")
+        engine.index_target(splice.donor, "donor")
+        result = engine.match(splice.tampered)
+        assert result.coherent_regions[0].image_id == "donor"
+        assert result.best_match.image_id == "donor"
 
-            assert engine2.index.size == engine.index.size
+    def test_target_ids_filter(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        engine.index_target(make_negative_pair(seed=7).donor, "other")
+        result = engine.match(splice.tampered, target_ids=["other"])
+        assert all(m.image_id == "other" for m in result.matches)
+        assert not result.significant_regions
+
+    def test_heatmap_shape(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        result = engine.match(splice.tampered, return_heatmap=True)
+        assert result.heatmap.shape == splice.donor.shape[:2]
+        assert 0.0 <= result.heatmap.min() and result.heatmap.max() <= 1.0
+
+
+class TestIndexLifecycle:
+    def test_indexing_order_does_not_matter(self, splice):
+        # Regression: PCA used to be trained part-way through indexing, leaving
+        # earlier targets in a different descriptor space and unmatchable.
+        other = make_negative_pair(seed=7).donor
+
+        def offsets(order):
+            engine = ForensicsEngine()
+            for image, image_id in order:
+                engine.index_target(image, image_id)
+            result = engine.match(splice.tampered)
+            return [(r.image_id, r.offset) for r in result.significant_regions]
+
+        first = offsets([(splice.donor, "donor"), (other, "other")])
+        second = offsets([(other, "other"), (splice.donor, "donor")])
+        assert first and first == second
+
+    def test_remove_target_frees_index(self, splice):
+        # Regression: removal used to keep the vectors in FAISS, where they kept
+        # taking nearest-neighbour slots.
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        engine.index_target(make_negative_pair(seed=7).donor, "other")
+        before = engine.index.size
+        assert engine.remove_target("donor")
+        assert engine.index.size < before
+        assert not engine.has_target("donor")
+        result = engine.match(splice.tampered)
+        assert all(m.image_id == "other" for m in result.matches)
+
+    def test_max_targets_evicts_oldest(self):
+        engine = ForensicsEngine(Config(max_targets=2))
+        for i in range(3):
+            engine.index_target(make_negative_pair(seed=i, image_size=48).donor, f"t{i}")
+        assert engine.target_ids == ["t1", "t2"]
+        assert engine.index.image_ids == ["t1", "t2"]
+
+    def test_duplicate_id_rejected(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        with pytest.raises(TargetExistsError):
+            engine.index_target(splice.donor, "donor")
+
+    def test_save_load_and_search(self, splice, tmp_path):
+        # Regression: `spade index` + `spade search` used to query with a different
+        # descriptor projection than the one the index was built with.
+        donor_path = tmp_path / "donor.png"
+        Image.fromarray(splice.donor).save(donor_path)
+
+        engine = ForensicsEngine()
+        engine.index_target(load_image(str(donor_path)), "donor", image_path=str(donor_path))
+        expected = engine.match(splice.tampered).coherent_regions[0].offset
+        engine.save(str(tmp_path / "bundle"))
+
+        loaded = ForensicsEngine.load(str(tmp_path / "bundle"))
+        assert loaded.target_ids == ["donor"]
+        assert loaded.index.size == engine.index.size
+        result = loaded.match(splice.tampered)  # patches reloaded from donor.png
+        assert result.significant_regions
+        assert result.coherent_regions[0].offset == expected
+
+    def test_load_keeps_index_shaping_settings(self, splice, tmp_path):
+        engine = ForensicsEngine(Config(patch_size=4))
+        engine.index_target(splice.donor, "donor")
+        engine.save(str(tmp_path / "bundle"))
+        loaded = ForensicsEngine.load(str(tmp_path / "bundle"), patch_size=6, min_probability=0.2)
+        assert loaded.config.patch_size == 4
+        assert loaded.config.min_probability == 0.2
+
+    def test_missing_image_file_is_skipped(self, splice, tmp_path):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor", image_path=str(tmp_path / "gone.png"))
+        engine.save(str(tmp_path / "bundle"))
+        loaded = ForensicsEngine.load(str(tmp_path / "bundle"))
+        result = loaded.match(splice.tampered)
+        assert result.matches == []

@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from spade.extraction.patches import PatchExtractor, PatchCollection
+from spade.extraction.patches import PatchExtractor, PatchCollection, max_entropy
 
 
 class TestPatchExtractor:
@@ -38,8 +38,25 @@ class TestPatchExtractor:
 
         assert result.entropy is not None
         assert len(result.entropy) == len(result.patches)
-        # Entropy should be in valid range [0, 4] for 16 bins
-        assert all(0 <= e <= 4 for e in result.entropy)
+        # 8 bins -> at most 3 bits
+        assert all(0 <= e <= 3 for e in result.entropy)
+
+    def test_entropy_matches_reference_histogram(self):
+        rng = np.random.RandomState(0)
+        patches = rng.rand(200, 3, 3, 3).astype(np.float32)
+        fast = PatchExtractor(size=3)._compute_entropy_batch(patches)
+        gray = (patches @ np.array([0.299, 0.587, 0.114], np.float32)).reshape(200, -1)
+        for i in range(200):
+            hist, _ = np.histogram(gray[i], bins=8, range=(0, 1))
+            prob = hist[hist > 0] / hist.sum()
+            assert fast[i] == pytest.approx(-(prob * np.log2(prob)).sum(), abs=1e-5)
+
+    def test_unreachable_entropy_threshold_rejected(self):
+        # 9 pixels in 8 bins can't reach 3 bits; the old README value of 3.0 silently
+        # filtered every patch out.
+        assert max_entropy(3) == pytest.approx(3.0)
+        with pytest.raises(ValueError, match="never be reached"):
+            PatchExtractor(size=3, entropy_threshold=3.0)
 
     def test_coordinates_are_correct(self):
         extractor = PatchExtractor(size=3, stride=1, entropy_threshold=None)

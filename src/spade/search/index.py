@@ -1,250 +1,187 @@
-"""FAISS-based approximate nearest neighbor search."""
+"""Exact nearest-neighbour index over patch descriptors (FAISS)."""
+
+from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Tuple
+
 import numpy as np
 
-from spade.logging_config import get_logger
-from spade.exceptions import IndexStoreError as SPADEIndexError, IndexCorruptedError, DependencyError
-
-logger = get_logger("search.index")
+from spade.exceptions import (
+    DependencyError,
+    IndexCorruptedError,
+    IndexStoreError,
+    TargetExistsError,
+)
 
 try:
     import faiss
-    FAISS_AVAILABLE = True
-    # Check for GPU support
-    try:
-        _res = faiss.StandardGpuResources()
-        FAISS_GPU_AVAILABLE = True
-        del _res
-    except (AttributeError, RuntimeError):
-        FAISS_GPU_AVAILABLE = False
-except ImportError:
+except ImportError:  # pragma: no cover - faiss is a hard dependency
     faiss = None
-    FAISS_AVAILABLE = False
-    FAISS_GPU_AVAILABLE = False
+
+_FORMAT_VERSION = 2
+_SEARCH_CHUNK = 8192
 
 
 @dataclass
-class SearchResult:
-    """Single search result with metadata."""
-    index: int
-    distance: float
-    metadata: Dict[str, Any]
+class SearchHits:
+    """k-NN results for a batch of queries.
+
+    ``owner[i, j]`` indexes into ``image_ids`` (-1 = no hit); ``patch_idx[i, j]``
+    is the patch's position within that image's indexed patches. Distances are
+    squared L2.
+    """
+    distances: np.ndarray   # (N, k) float32
+    owner: np.ndarray       # (N, k) int64
+    patch_idx: np.ndarray   # (N, k) int64
+    image_ids: List[str]
 
 
 class ANNIndex:
-    """
-    Approximate nearest neighbor index using FAISS.
-    Stores descriptors and associated metadata for retrieval.
+    """Flat L2 index where every image owns a contiguous block of vector ids.
+
+    Ids are never reused, so removing an image is an exact ``remove_ids`` on its
+    range and nothing stale is ever returned by a search.
     """
 
-    def __init__(self, dim: int = 128, use_gpu: bool = False):
-        """
-        Args:
-            dim: Descriptor dimensionality
-            use_gpu: Whether to use GPU acceleration (requires faiss-gpu)
-        """
-        if not FAISS_AVAILABLE:
+    def __init__(self, dim: int):
+        if faiss is None:
             raise DependencyError("faiss-cpu required: pip install faiss-cpu")
-
         self.dim = dim
-        self.use_gpu = use_gpu
-        self._gpu_resources = None
-        self._lock = threading.RLock()  # Reentrant lock for thread safety
+        self._lock = threading.RLock()
+        self._index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+        self._next_id = 0
+        self._ranges: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()  # image_id -> (start, count)
 
-        # Create base CPU index
-        cpu_index = faiss.IndexFlatL2(dim)
+    # ------------------------------------------------------------------
 
-        # Move to GPU if requested and available
-        if use_gpu:
-            if FAISS_GPU_AVAILABLE:
-                self._gpu_resources = faiss.StandardGpuResources()
-                self.index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, cpu_index)
-            else:
-                logger.warning("FAISS-GPU not available, falling back to CPU")
-                self.use_gpu = False
-                self.index = cpu_index
-        else:
-            self.index = cpu_index
-
-        self.metadata: List[Dict[str, Any]] = []
-
-    def add(
-        self,
-        descriptors: np.ndarray,
-        metadata_list: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
-        """
-        Add descriptors to the index (thread-safe).
-
-        Args:
-            descriptors: Array of shape (N, dim)
-            metadata_list: Optional metadata for each descriptor
-        """
+    def add(self, image_id: str, descriptors: np.ndarray) -> None:
         with self._lock:
-            descriptors = np.ascontiguousarray(descriptors.astype(np.float32))
+            if image_id in self._ranges:
+                raise TargetExistsError(f"'{image_id}' is already indexed")
+            descriptors = np.ascontiguousarray(descriptors, dtype=np.float32)
+            if descriptors.ndim != 2 or descriptors.shape[1] != self.dim:
+                raise IndexStoreError(f"expected (N, {self.dim}) descriptors, got {descriptors.shape}")
             n = len(descriptors)
+            ids = np.arange(self._next_id, self._next_id + n, dtype=np.int64)
+            if n:
+                self._index.add_with_ids(descriptors, ids)
+            self._ranges[image_id] = (self._next_id, n)
+            self._next_id += n
 
-            if metadata_list is None:
-                metadata_list = [{} for _ in range(n)]
-
-            if len(metadata_list) != n:
-                raise SPADEIndexError(f"Metadata length {len(metadata_list)} != descriptors {n}")
-
-            self.index.add(descriptors)
-            self.metadata.extend(metadata_list)
-
-    def search(self, query: np.ndarray, k: int = 100, lsh_candidates: int = 1000) -> List[SearchResult]:
-        """
-        Search for k nearest neighbors (thread-safe).
-
-        Args:
-            query: Query descriptor, shape (dim,) or (1, dim)
-            k: Number of neighbors
-            lsh_candidates: Ignored (for API compatibility with HybridIndex)
-
-        Returns:
-            List of SearchResult objects
-        """
+    def remove(self, image_id: str) -> bool:
         with self._lock:
-            # lsh_candidates is ignored - only used by HybridIndex
-            if query.ndim == 1:
-                query = query.reshape(1, -1)
-            query = np.ascontiguousarray(query.astype(np.float32))
+            entry = self._ranges.pop(image_id, None)
+            if entry is None:
+                return False
+            start, count = entry
+            if count:
+                self._index.remove_ids(faiss.IDSelectorRange(start, start + count))
+            return True
 
-            k = min(k, self.index.ntotal)
-            if k == 0:
-                return []
-
-            distances, indices = self.index.search(query, k)
-
-            results = []
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx >= 0:
-                    results.append(SearchResult(
-                        index=int(idx),
-                        distance=float(dist),
-                        metadata=self.metadata[idx] if idx < len(self.metadata) else {},
-                    ))
-            return results
-
-    def save(self, path: str) -> None:
-        """
-        Save index and metadata to files atomically (thread-safe).
-
-        Uses FAISS binary format for index and JSON for metadata (secure).
-        Writes to temporary files first, then atomically renames to prevent corruption.
-        """
+    def search(self, queries: np.ndarray, k: int) -> SearchHits:
         with self._lock:
-            import tempfile
-            import shutil
+            queries = np.ascontiguousarray(queries, dtype=np.float32).reshape(-1, self.dim)
+            n = len(queries)
+            image_ids = list(self._ranges)
+            k = min(k, self._index.ntotal)
+            if n == 0 or k == 0:
+                empty_f = np.zeros((n, 0), dtype=np.float32)
+                empty_i = np.zeros((n, 0), dtype=np.int64)
+                return SearchHits(empty_f, empty_i, empty_i.copy(), image_ids)
 
-            index_path = f"{path}.index"
-            metadata_path = f"{path}.meta.json"
+            distances = np.empty((n, k), dtype=np.float32)
+            ids = np.empty((n, k), dtype=np.int64)
+            for start in range(0, n, _SEARCH_CHUNK):
+                stop = min(start + _SEARCH_CHUNK, n)
+                distances[start:stop], ids[start:stop] = self._index.search(queries[start:stop], k)
 
-            # Write to temporary files first
-            try:
-                # Save index to temporary file
-                with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.index') as tmp_index:
-                    tmp_index_path = tmp_index.name
+            owner, patch_idx = self._resolve(ids, image_ids)
+            return SearchHits(distances, owner, patch_idx, image_ids)
 
-                if self.use_gpu and hasattr(faiss, 'index_gpu_to_cpu'):
-                    cpu_index = faiss.index_gpu_to_cpu(self.index)
-                    faiss.write_index(cpu_index, tmp_index_path)
-                else:
-                    faiss.write_index(self.index, tmp_index_path)
+    def _resolve(self, ids: np.ndarray, image_ids: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        """Map vector ids to (owner index, patch index); -1 where there's no hit."""
+        starts = np.array([self._ranges[i][0] for i in image_ids], dtype=np.int64)
+        order = np.argsort(starts)
+        sorted_starts = starts[order]
+        pos = np.searchsorted(sorted_starts, ids, side="right") - 1
+        valid = (ids >= 0) & (pos >= 0)
+        owner = np.where(valid, order[np.clip(pos, 0, None)], -1)
+        patch_idx = np.where(valid, ids - starts[np.clip(owner, 0, None)], -1)
+        return owner, patch_idx
 
-                # Save metadata to temporary file
-                json_safe_metadata = []
-                for meta in self.metadata:
-                    safe_meta = {}
-                    for k, v in meta.items():
-                        if isinstance(v, tuple):
-                            safe_meta[k] = [int(x) if hasattr(x, 'item') else x for x in v]
-                        elif hasattr(v, 'item'):  # numpy scalar
-                            safe_meta[k] = v.item()
-                        else:
-                            safe_meta[k] = v
-                    json_safe_metadata.append(safe_meta)
+    # ------------------------------------------------------------------
 
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.meta.json') as tmp_meta:
-                    tmp_meta_path = tmp_meta.name
-                    json.dump(json_safe_metadata, tmp_meta)
+    def count(self, image_id: str) -> int:
+        entry = self._ranges.get(image_id)
+        return entry[1] if entry else 0
 
-                # Atomic rename (POSIX systems guarantee atomicity)
-                # On Windows, need to remove target first
-                import os
-                if os.path.exists(index_path):
-                    os.remove(index_path)
-                if os.path.exists(metadata_path):
-                    os.remove(metadata_path)
-
-                shutil.move(tmp_index_path, index_path)
-                shutil.move(tmp_meta_path, metadata_path)
-
-            except Exception as e:
-                # Clean up temp files on failure
-                try:
-                    if 'tmp_index_path' in locals() and os.path.exists(tmp_index_path):
-                        os.remove(tmp_index_path)
-                    if 'tmp_meta_path' in locals() and os.path.exists(tmp_meta_path):
-                        os.remove(tmp_meta_path)
-                except:
-                    pass
-                raise SPADEIndexError(f"Failed to save index atomically: {str(e)}") from e
-
-    def load(self, path: str) -> None:
-        """
-        Load index and metadata from files (thread-safe).
-
-        Supports both legacy .npy format and new JSON format.
-        """
-        with self._lock:
-            cpu_index = faiss.read_index(f"{path}.index")
-
-            # Move to GPU if originally configured for GPU
-            if self.use_gpu and FAISS_GPU_AVAILABLE:
-                if self._gpu_resources is None:
-                    self._gpu_resources = faiss.StandardGpuResources()
-                self.index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, cpu_index)
-            else:
-                self.index = cpu_index
-
-            # Try JSON first (secure), fall back to npy (legacy)
-            json_path = f"{path}.meta.json"
-            npy_path = f"{path}.meta.npy"
-
-            try:
-                with open(json_path, 'r') as f:
-                    self.metadata = json.load(f)
-                # Convert coord lists back to tuples
-                for meta in self.metadata:
-                    if 'coord' in meta and isinstance(meta['coord'], list):
-                        meta['coord'] = tuple(meta['coord'])
-            except FileNotFoundError:
-                # Legacy format - load with pickle but warn
-                logger.warning(
-                    "Loading legacy .npy metadata format. "
-                    "Re-save index to use secure JSON format."
-                )
-                logger.warning(
-                    "SECURITY WARNING: Legacy .npy format uses pickle which can execute "
-                    "arbitrary code. Only load indexes from trusted sources!"
-                )
-                self.metadata = np.load(npy_path, allow_pickle=True).tolist()
-
-            # Validate that index size matches metadata size
-            if self.index.ntotal != len(self.metadata):
-                raise IndexCorruptedError(
-                    f"Index corruption detected: FAISS index has {self.index.ntotal} vectors "
-                    f"but metadata has {len(self.metadata)} entries. Index may be corrupted."
-                )
+    @property
+    def image_ids(self) -> List[str]:
+        return list(self._ranges)
 
     @property
     def size(self) -> int:
-        """Number of vectors in the index (thread-safe)."""
         with self._lock:
-            return self.index.ntotal
+            return int(self._index.ntotal)
+
+    # ------------------------------------------------------------------
+
+    def save(self, path: str) -> None:
+        """Write ``{path}.index`` and ``{path}.meta.json``, each atomically."""
+        with self._lock:
+            meta = {
+                "version": _FORMAT_VERSION,
+                "dim": self.dim,
+                "next_id": self._next_id,
+                "targets": [[image_id, start, count] for image_id, (start, count) in self._ranges.items()],
+            }
+            _atomic_write(f"{path}.index", lambda tmp: faiss.write_index(self._index, tmp))
+            _atomic_write(f"{path}.meta.json", lambda tmp: _write_json(tmp, meta))
+
+    @classmethod
+    def load(cls, path: str) -> "ANNIndex":
+        try:
+            with open(f"{path}.meta.json") as f:
+                meta = json.load(f)
+        except FileNotFoundError as e:
+            raise IndexStoreError(f"no index metadata at {path}.meta.json") from e
+        if meta.get("version") != _FORMAT_VERSION:
+            raise IndexStoreError(
+                f"unsupported index format {meta.get('version')!r}; re-index with this SPADE version"
+            )
+        index = cls(int(meta["dim"]))
+        index._index = faiss.read_index(f"{path}.index")
+        index._next_id = int(meta["next_id"])
+        index._ranges = OrderedDict((t[0], (int(t[1]), int(t[2]))) for t in meta["targets"])
+        expected = sum(count for _, count in index._ranges.values())
+        if index._index.ntotal != expected or index._index.d != index.dim:
+            raise IndexCorruptedError(
+                f"index holds {index._index.ntotal} vectors of dim {index._index.d}, "
+                f"metadata expects {expected} of dim {index.dim}"
+            )
+        return index
+
+
+def _write_json(path: str, obj) -> None:
+    with open(path, "w") as f:
+        json.dump(obj, f)
+
+
+def _atomic_write(path: str, writer) -> None:
+    """Write via a temp file in the same directory, then os.replace (atomic on POSIX and Windows)."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".spade-", suffix=".tmp")
+    os.close(fd)
+    try:
+        writer(tmp)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise

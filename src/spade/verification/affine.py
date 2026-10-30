@@ -180,3 +180,31 @@ class AffineVerifier:
             prev_rss = rss
 
         return M, b, rss
+
+
+def fit_gain_offset_batch(
+    source: np.ndarray,
+    target: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Weighted least-squares fit of target = gain * source + offset, per row.
+
+    Used on grey levels as the cheap per-patch check: two parameters can't
+    overfit a patch the way a 12-parameter color fit can.
+
+    Args:
+        source, target: (N, P) grey levels.
+        weights: (N, P) per-pixel weights; 0 drops a pixel (e.g. clipped).
+
+    Returns:
+        (N,) weighted residual sum of squares.
+    """
+    w = weights.astype(np.float64)
+    wsum = np.maximum(w.sum(axis=1), 1e-12)
+    src_mean = (w * source).sum(axis=1) / wsum
+    tgt_mean = (w * target).sum(axis=1) / wsum
+    sc = source - src_mean[:, None]
+    tc = target - tgt_mean[:, None]
+    gain = (w * sc * tc).sum(axis=1) / np.maximum((w * sc * sc).sum(axis=1), 1e-12)
+    residual = tc - gain[:, None] * sc
+    return (w * residual * residual).sum(axis=1)

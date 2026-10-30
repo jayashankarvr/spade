@@ -15,6 +15,7 @@ except ImportError:
 
 from spade import __version__
 from spade.engine import ForensicsEngine, Config, load_image
+from spade.exceptions import ConfigurationError
 
 
 def main():
@@ -32,14 +33,26 @@ def cli():
     pass
 
 
-def validate_params(threshold: float, patch_size: int, entropy: float) -> None:
-    """Validate common CLI parameters."""
-    if not 0 <= threshold <= 1:
+def validate_params(threshold: Optional[float], patch_size: Optional[int], entropy: float) -> None:
+    """Validate common CLI parameters (None means "use the Config default")."""
+    if threshold is not None and not 0 <= threshold <= 1:
         raise click.BadParameter(f"threshold must be between 0 and 1, got {threshold}")
-    if not (3 <= patch_size <= 16):
+    if patch_size is not None and not (3 <= patch_size <= 16):
         raise click.BadParameter(f"patch-size must be between 3 and 16, got {patch_size}")
     if entropy < 0:
         raise click.BadParameter(f"entropy must be >= 0, got {entropy}")
+
+
+def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: float) -> Config:
+    overrides = {"entropy_threshold": entropy if entropy > 0 else None}
+    if threshold is not None:
+        overrides["min_probability"] = threshold
+    if patch_size is not None:
+        overrides["patch_size"] = patch_size
+    try:
+        return Config(**overrides)
+    except ConfigurationError as e:
+        raise click.BadParameter(str(e))
 
 
 def safe_load_image(path: str) -> np.ndarray:
@@ -64,20 +77,39 @@ def safe_load_image(path: str) -> np.ndarray:
     return img
 
 
+def echo_regions(result, limit: int = 5) -> None:
+    """Print the most significant regions, or say there are none."""
+    significant = result.significant_regions
+    if not significant:
+        click.echo("\nNo significant copied region found (no region with NFA < max_nfa).")
+        return
+    click.echo(f"\nSignificant regions: {len(significant)}")
+    for region in significant[:limit]:
+        x, y, w, h = region.source_bbox
+        tx, ty, tw, th = region.target_bbox
+        click.echo(
+            f"  {region.image_id}: source ({x},{y}) {w}x{h} -> target ({tx},{ty}) {tw}x{th}, "
+            f"{len(region.matches)} patches, log10 NFA {region.log10_nfa:.1f}"
+        )
+
+
+THRESHOLD_HELP = "Per-patch fit p-value floor (0-1); default from config"
+
+
 @cli.command()
 @click.argument("source", type=click.Path(exists=True))
 @click.argument("target", type=click.Path(exists=True))
-@click.option("-t", "--threshold", default=0.5, help="Minimum match probability (0-1)")
-@click.option("-p", "--patch-size", default=3, help="Patch size (3-16)")
-@click.option("-e", "--entropy", default=2.5, help="Entropy threshold (0 to disable)")
+@click.option("-t", "--threshold", type=float, default=None, help=THRESHOLD_HELP)
+@click.option("-p", "--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
+@click.option("-e", "--entropy", default=0.0, help="Entropy threshold in bits (0 to disable)")
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
 @click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 def match(
     source: str,
     target: str,
-    threshold: float,
-    patch_size: int,
+    threshold: Optional[float],
+    patch_size: Optional[int],
     entropy: float,
     output: Optional[str],
     json_output: Optional[str],
@@ -85,6 +117,7 @@ def match(
 ):
     """Match SOURCE image against TARGET image."""
     validate_params(threshold, patch_size, entropy)
+    config = build_config(threshold, patch_size, entropy)
 
     if verbose:
         click.echo(f"Loading source: {source}")
@@ -94,12 +127,6 @@ def match(
         click.echo(f"Loading target: {target}")
     target_img = safe_load_image(target)
 
-    config = Config(
-        patch_size=patch_size,
-        entropy_threshold=entropy if entropy > 0 else None,
-        min_probability=threshold,
-    )
-
     engine = ForensicsEngine(config)
 
     if verbose:
@@ -107,25 +134,17 @@ def match(
     num_patches = engine.index_target(target_img, "target")
     if num_patches == 0:
         raise click.ClickException(
-            "No patches extracted from target. "
-            "Try lowering entropy threshold (-e 0) or using a larger image."
+            "No textured patches in target. "
+            "Try lowering the entropy threshold (-e 0) or using a larger image."
         )
     if verbose:
         click.echo(f"  Indexed {num_patches} patches")
-
-    if verbose:
         click.echo("Matching...")
     result = engine.match(source_img)
 
     click.echo(f"\nSource patches: {result.stats['source_patches']}")
-    click.echo(f"Matches found: {result.stats['total_matches']}")
-
-    if result.best_match:
-        click.echo(f"\nBest match:")
-        click.echo(f"  Probability: {result.best_match.probability:.3f}")
-        click.echo(f"  Location: {result.best_match.target_coord}")
-    else:
-        click.echo("\nNo matches found above threshold.")
+    click.echo(f"Patch matches: {result.stats['total_matches']}")
+    echo_regions(result)
 
     if output and result.heatmap is not None:
         heatmap_colored = colorize_heatmap(result.heatmap)
@@ -150,9 +169,10 @@ def match(
 
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True))
-@click.option("-o", "--output", default="index.spade", help="Output index file path")
+@click.option("-o", "--output", default="index.spade", help="Output index path prefix")
 @click.option("-p", "--pattern", default="*.jpg,*.png", help="File patterns to index")
-def index(directory: str, output: str, pattern: str):
+@click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
+def index(directory: str, output: str, pattern: str, patch_size: Optional[int]):
     """Index all images in DIRECTORY for later searching."""
     dir_path = Path(directory)
     patterns = [p.strip() for p in pattern.split(",")]
@@ -172,123 +192,73 @@ def index(directory: str, output: str, pattern: str):
 
     click.echo(f"Found {len(image_files)} images")
 
-    engine = ForensicsEngine()
+    engine = ForensicsEngine(build_config(None, patch_size, 0.0))
     total_patches = 0
 
     with click.progressbar(image_files, label="Indexing") as progress:
         for img_path in progress:
             try:
                 img = load_image(str(img_path))
-                total_patches += engine.index_target(img, str(img_path))
+                # The absolute path lets `spade search` reload patches for verification.
+                total_patches += engine.index_target(img, str(img_path), image_path=str(img_path.resolve()))
             except Exception as e:
                 click.echo(f"\nSkipped {img_path}: {e}")
 
-    click.echo(f"\nIndexed {total_patches} patches from {len(image_files)} images")
+    click.echo(f"\nIndexed {total_patches} patches from {engine.target_count} images")
 
-    engine.index.save(output)
+    engine.save(output)
     click.echo(f"Index saved to: {output}")
 
 
 @cli.command()
 @click.argument("source", type=click.Path(exists=True))
-@click.argument("index_file", type=click.Path(exists=True))
-@click.option("-t", "--threshold", default=0.5, help="Minimum match probability (0-1)")
-@click.option("-k", "--top-k", default=10, help="Number of top matches to show")
+@click.argument("index_file")
+@click.option("-t", "--threshold", type=float, default=None, help=THRESHOLD_HELP)
+@click.option("-k", "--top-k", default=10, help="Number of regions to show")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 def search(
     source: str,
     index_file: str,
-    threshold: float,
+    threshold: Optional[float],
     top_k: int,
     verbose: bool,
 ):
-    """Search SOURCE image against a saved INDEX_FILE."""
-    if not 0 <= threshold <= 1:
-        raise click.BadParameter(f"threshold must be between 0 and 1, got {threshold}")
+    """Search SOURCE image against a saved INDEX_FILE (the prefix given to `spade index -o`)."""
+    validate_params(threshold, None, 0.0)
 
     if verbose:
         click.echo(f"Loading index: {index_file}")
-
-    engine = ForensicsEngine(Config(min_probability=threshold))
+    overrides = {} if threshold is None else {"min_probability": threshold}
     try:
-        engine.index.load(index_file)
+        engine = ForensicsEngine.load(index_file, **overrides)
     except Exception as e:
         raise click.ClickException(f"Failed to load index: {e}")
 
     if engine.index.size == 0:
         raise click.ClickException("Index is empty. No images have been indexed.")
-
     if verbose:
-        click.echo(f"  Index contains {engine.index.size} descriptors")
+        click.echo(f"  {engine.index.size} descriptors from {engine.target_count} images")
 
-    # Collect unique image paths from metadata
-    image_paths = set()
-    for meta in engine.index.metadata:
-        if "image_id" in meta:
-            image_paths.add(meta["image_id"])
-
-    if verbose:
-        click.echo(f"  From {len(image_paths)} images")
-
-    # Try to reload images for verification
-    loaded_count = 0
-    for img_path in image_paths:
-        if Path(img_path).exists():
-            try:
-                img = load_image(img_path)
-                # Re-extract patches for verification
-                patches = engine.extractor.extract(img)
-                engine._target_patches[img_path] = patches
-                engine._target_shapes[img_path] = img.shape[:2]
-                loaded_count += 1
-            except Exception as e:
-                if verbose:
-                    click.echo(f"  Could not load {img_path}: {e}")
-
-    if loaded_count < len(image_paths):
-        click.echo(f"Warning: Only {loaded_count}/{len(image_paths)} images available for verification")
-        click.echo("Matches from missing images will be skipped (cannot verify without original image)")
-
-    if verbose:
-        click.echo(f"\nLoading source: {source}")
     source_img = safe_load_image(source)
-
     if verbose:
         click.echo("Searching...")
     result = engine.match(source_img, return_heatmap=False)
 
     click.echo(f"\nSource patches: {result.stats['source_patches']}")
-    click.echo(f"Verified matches: {result.stats['total_matches']}")
-
-    if result.matches:
-        # Group by image and show top results
-        by_image = {}
-        for m in result.matches:
-            if m.image_id not in by_image or m.probability > by_image[m.image_id].probability:
-                by_image[m.image_id] = m
-
-        sorted_matches = sorted(by_image.values(), key=lambda x: x.probability, reverse=True)
-
-        click.echo(f"\nTop matches:")
-        for i, m in enumerate(sorted_matches[:top_k]):
-            click.echo(f"  {i+1}. {m.image_id}")
-            click.echo(f"     Probability: {m.probability:.3f}, Location: {m.target_coord}")
-    else:
-        click.echo("\nNo matches found above threshold.")
+    click.echo(f"Patch matches: {result.stats['total_matches']}")
+    echo_regions(result, limit=top_k)
 
 
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8000, help="Port to listen on")
-@click.option("--patch-size", default=3, help="Patch size (3-16)")
+@click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
 @click.option("--pyramid/--no-pyramid", default=False, help="Enable multi-scale pyramid")
-@click.option("--lsh/--no-lsh", default=False, help="Enable LSH pre-filtering")
 def serve(
     host: str,
     port: int,
-    patch_size: int,
+    patch_size: Optional[int],
     pyramid: bool,
-    lsh: bool,
 ):
     """Start the REST API server."""
     try:
@@ -298,16 +268,14 @@ def serve(
             "FastAPI required for API server: pip install spade-forensics[api]"
         )
 
-    config = Config(
-        patch_size=patch_size,
-        pyramid_enabled=pyramid,
-        lsh_enabled=lsh,
-    )
+    overrides = {"pyramid_enabled": pyramid}
+    if patch_size is not None:
+        overrides["patch_size"] = patch_size
+    config = Config(**overrides)
 
     click.echo(f"Starting SPADE API server on {host}:{port}")
-    click.echo(f"  Patch size: {patch_size}")
+    click.echo(f"  Patch size: {config.patch_size}")
     click.echo(f"  Pyramid: {'enabled' if pyramid else 'disabled'}")
-    click.echo(f"  LSH: {'enabled' if lsh else 'disabled'}")
     click.echo(f"\nAPI documentation: http://localhost:{port}/docs\n")
 
     run_server(host=host, port=port, config=config)

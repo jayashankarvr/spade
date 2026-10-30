@@ -1,44 +1,35 @@
 """Spatial aggregation and heatmap generation."""
 
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional
+from typing import List, Optional, Tuple
 import numpy as np
-from scipy.ndimage import gaussian_filter, label
+from scipy.ndimage import gaussian_filter
 
 
 @dataclass
 class Match:
     """A verified match between source and target patches."""
     source_coord: Tuple[int, int]
-    target_coord: Tuple[int, int]
-    patch_size: int
+    target_coord: Tuple[int, int]   # full-resolution target coordinates
+    patch_size: int                 # side of the source patch, in pixels
     probability: float
     image_id: str = ""
     # Recovered affine color transform (target = M @ source + b) from verification.
     # Optional so existing callers/tests that build Match directly keep working.
     color_M: Optional[np.ndarray] = None
     color_b: Optional[np.ndarray] = None
+    # Pyramid level the target patch came from (1.0 = full resolution).
+    target_scale: float = 1.0
 
 
 class SpatialAggregator:
-    """
-    Aggregates matches into forensic heatmaps.
+    """Turns matches into a target-image heatmap of where the copied pixels came from."""
 
-    Combines match probabilities at each location with optional
-    scale-based weighting (larger patches are more reliable).
-    """
-
-    def __init__(
-        self,
-        scale_weights: Optional[Dict[int, float]] = None,
-        smoothing_sigma: float = 2.0,
-    ):
+    def __init__(self, smoothing_sigma: float = 2.0):
         """
         Args:
-            scale_weights: Weight per patch size (default: larger = higher weight)
-            smoothing_sigma: Gaussian smoothing sigma for final heatmap
+            smoothing_sigma: Gaussian smoothing sigma for final heatmap (0 = off)
         """
-        self.scale_weights = scale_weights or {3: 1.0, 4: 1.2, 5: 1.5, 6: 2.0}
         self.smoothing_sigma = smoothing_sigma
 
     def aggregate(
@@ -47,7 +38,7 @@ class SpatialAggregator:
         target_shape: Tuple[int, int],
     ) -> np.ndarray:
         """
-        Create aggregated heatmap from matches.
+        Mean match probability over each match's target footprint.
 
         Args:
             matches: List of Match objects
@@ -61,62 +52,21 @@ class SpatialAggregator:
         counts = np.zeros((height, width), dtype=np.float32)
 
         for match in matches:
-            x, y = match.target_coord
-            if not (0 <= x < width and 0 <= y < height):
+            x, y = int(match.target_coord[0]), int(match.target_coord[1])
+            size = max(1, int(round(match.patch_size / match.target_scale)))
+            x0, y0, x1, y1 = max(0, x), max(0, y), min(width, x + size), min(height, y + size)
+            if x0 >= x1 or y0 >= y1:
                 continue
+            heatmap[y0:y1, x0:x1] += match.probability
+            counts[y0:y1, x0:x1] += 1.0
 
-            weight = self.scale_weights.get(match.patch_size, 1.0)
-            heatmap[y, x] += match.probability * weight
-            counts[y, x] += weight
-
-        # Normalize by counts
         mask = counts > 0
         heatmap[mask] /= counts[mask]
 
-        # Apply Gaussian smoothing
         if self.smoothing_sigma > 0:
             heatmap = gaussian_filter(heatmap, sigma=self.smoothing_sigma)
 
-        # Normalize to [0, 1]
         if heatmap.max() > 0:
             heatmap /= heatmap.max()
 
         return heatmap
-
-    def find_regions(
-        self,
-        heatmap: np.ndarray,
-        threshold: float = 0.5,
-        min_area: int = 9,
-    ) -> List[Tuple[int, int, int, int]]:
-        """
-        Find high-probability regions in heatmap.
-
-        Args:
-            heatmap: Aggregated heatmap (H, W)
-            threshold: Minimum probability threshold
-            min_area: Minimum region area in pixels
-
-        Returns:
-            List of bounding boxes (x, y, width, height)
-        """
-        binary = heatmap > threshold
-        labeled, num_features = label(binary)
-
-        regions = []
-        for i in range(1, num_features + 1):
-            ys, xs = np.where(labeled == i)
-            if len(ys) < min_area:
-                continue
-
-            x_min, x_max = int(xs.min()), int(xs.max())
-            y_min, y_max = int(ys.min()), int(ys.max())
-
-            regions.append((
-                x_min,
-                y_min,
-                x_max - x_min + 1,
-                y_max - y_min + 1,
-            ))
-
-        return regions

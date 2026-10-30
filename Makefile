@@ -33,7 +33,7 @@ install:
 	pip install -e .
 
 install-dev:
-	pip install -e ".[dev,api,cli]"
+	pip install -e ".[dev,api,bench]"
 
 # Testing
 test:

@@ -1,6 +1,6 @@
 # SPADE
 
-Sub-Patch Analysis & Detection Engine - finds tiny image fragments (3x3 to 6x6 pixels) in large image collections, even after color shifts, compression, or editing.
+Sub-Patch Analysis & Detection Engine - finds where a small region of an image was copied from, across a collection of images, even after recoloring and JPEG recompression. Every reported region comes with a significance score (an a-contrario NFA) you can put in a report.
 
 ## Install
 
@@ -11,7 +11,7 @@ pip install spade-forensics
 
 # With optional features:
 pip install spade-forensics[api]    # REST API
-pip install spade-forensics[lsh]    # LSH pre-filtering
+pip install spade-forensics[bench]  # Benchmark harness (OpenCV baseline)
 pip install spade-forensics[full]   # Everything
 ```
 
@@ -26,14 +26,12 @@ Requires: numpy, scipy, pillow, scikit-learn, faiss-cpu, click
 docker-compose up
 
 # Index an image
-curl -X POST http://localhost:8000/index \
-  -F "file=@target.jpg" \
-  -F "image_id=target_001"
+curl -X POST "http://localhost:8000/index?image_id=target_001" \
+  -F "file=@target.jpg"
 
 # Match a source image
-curl -X POST http://localhost:8000/match \
-  -F "file=@source.jpg" \
-  -F "return_heatmap=true"
+curl -X POST "http://localhost:8000/match?return_heatmap=true" \
+  -F "file=@source.jpg"
 ```
 
 ### Option 2: Python Module
@@ -66,14 +64,14 @@ make docker-build # Build Docker image
 # Match source against target
 spade match source.jpg target.jpg
 
-# With options
-spade match source.jpg target.jpg -t 0.7 -p 3 -o heatmap.png -v
+# With options: patch size, heatmap, JSON forensic report
+spade match source.jpg target.jpg -p 6 -o heatmap.png -j report.json -v
 
-# Index a directory
-spade index images/ -o myindex.spade
+# Index a directory (writes myindex.index, myindex.meta.json, myindex.engine.json)
+spade index images/ -o myindex
 
-# Search against saved index
-spade search query.jpg myindex.spade -k 5
+# Search against the saved index; patches are reloaded from the indexed files
+spade search query.jpg myindex -k 5
 ```
 
 ### Python API
@@ -81,31 +79,33 @@ spade search query.jpg myindex.spade -k 5
 #### Basic Usage
 
 ```python
-from spade import ForensicsEngine, Config
+from spade import ForensicsEngine
 from spade.engine import load_image
 
-# Create engine with default config
 engine = ForensicsEngine()
+engine.index_target(load_image("suspect_photo.jpg"), "suspect_001")
+engine.index_target(load_image("crime_scene.jpg"), "scene_001")
 
-# Index target images
-target1 = load_image("suspect_photo.jpg")
-engine.index_target(target1, "suspect_001")
+result = engine.match(load_image("questioned.jpg"))
 
-target2 = load_image("crime_scene.jpg")
-engine.index_target(target2, "scene_001")
+for region in result.significant_regions:
+    print(f"Copied from {region.image_id}")
+    print(f"  source bbox {region.source_bbox} -> target bbox {region.target_bbox}")
+    print(f"  {len(region.matches)} agreeing patches, log10 NFA {region.log10_nfa:.1f}")
+    print(f"  color transform M={region.color_M.round(3)}, b={region.color_b.round(3)}")
 
-# Match a source image
-source = load_image("fragment.jpg")
-result = engine.match(source)
-
-if result.best_match:
-    match = result.best_match
-    print(f"Found match in: {match.image_id}")
-    print(f"Probability: {match.probability:.3f}")
-    print(f"Source location: {match.source_coord}")
-    print(f"Target location: {match.target_coord}")
-    print(f"Total matches: {len(result.matches)}")
+# Where in the questioned image the copied pixels are (bool mask)
+mask = result.localization.mask
 ```
+
+`log10_nfa` is the log of the expected number of regions at least this good in
+images with no copy at all. -5 means you'd expect one such coincidence in
+100,000 comparable searches. Regions are reported as significant when NFA < 1
+(`Config.max_nfa`).
+
+Individual `Match` objects carry a `probability`, which is a per-patch
+chi-square goodness-of-fit p-value. It's a pre-filter, not evidence on its own:
+small patches fit each other by chance all the time.
 
 #### Custom Configuration
 
@@ -113,135 +113,56 @@ if result.best_match:
 from spade import ForensicsEngine, Config
 
 config = Config(
-    patch_size=4,                    # Larger patches (3-6)
-    stride=2,                        # Skip patches for speed
-    entropy_threshold=3.0,           # More aggressive filtering
-    descriptor_dim=256,              # Feature dimensions
-    min_probability=0.7,             # Higher confidence threshold
-    pyramid_enabled=True,            # Multi-scale matching
-    coherence_enabled=True,          # Spatial coherence verification
-    max_targets=100,                 # LRU cache limit
+    patch_size=6,            # 3-16; 5 is the benchmarked default
+    stride=2,                # skip positions for speed
+    noise_sigma=0.03,        # expected noise; raise for heavily compressed images
+    max_nfa=0.01,            # stricter significance
+    pyramid_enabled=True,    # also index targets at 1/2, 1/4, 1/8 scale
+    max_targets=100,         # evict least recently indexed targets past this
 )
-
 engine = ForensicsEngine(config)
 ```
 
 #### Multi-Scale Matching
 
+Targets can be indexed at several scales so a copy that was shrunk before
+pasting is still found. Matches record the level they came from in
+`target_scale`.
+
 ```python
-from spade import ForensicsEngine, Config
-
-# Enable multi-scale pyramid for scale-invariant matching
-config = Config(
-    pyramid_enabled=True,
-    pyramid_scales=[1.0, 0.5, 0.25, 0.125],  # 1x, 0.5x, 0.25x, 0.125x
-    pyramid_min_size=16,                      # Min dimension at smallest scale
-)
-
+config = Config(pyramid_enabled=True, pyramid_scales=[1.0, 0.5, 0.25])
 engine = ForensicsEngine(config)
-
-# Now matches work even if source is scaled differently than target
-source_scaled = load_image("fragment_50percent.jpg")
-result = engine.match(source_scaled)
 ```
 
-#### Batch Processing
+#### Heatmap and Report
 
 ```python
-from spade import ForensicsEngine
-from pathlib import Path
+from spade.report import build_report, write_report
 
-engine = ForensicsEngine()
-
-# Index all targets in a directory
-target_dir = Path("targets")
-for img_path in target_dir.glob("*.jpg"):
-    image = load_image(str(img_path))
-    engine.index_target(image, img_path.stem)
-    print(f"Indexed: {img_path.name}")
-
-# Match multiple sources
-source_dir = Path("sources")
-results = []
-
-for img_path in source_dir.glob("*.jpg"):
-    image = load_image(str(img_path))
-    result = engine.match(image)
-
-    if result.best_match:
-        results.append({
-            "source": img_path.name,
-            "target": result.best_match.image_id,
-            "probability": result.best_match.probability,
-            "coherent_regions": len(result.coherent_regions),
-        })
-
-# Print summary
-for r in sorted(results, key=lambda x: x["probability"], reverse=True):
-    print(f"{r['source']} -> {r['target']}: {r['probability']:.3f}")
-```
-
-#### Heatmap Visualization
-
-```python
-from spade import ForensicsEngine
-from spade.engine import load_image
-import matplotlib.pyplot as plt
-
-engine = ForensicsEngine()
-
-# Index target
-target = load_image("target.jpg")
-engine.index_target(target, "target_001")
-
-# Match with heatmap
-source = load_image("source.jpg")
 result = engine.match(source, return_heatmap=True)
+result.heatmap          # (H, W) in [0, 1] over the best region's target image
 
-if result.heatmap is not None:
-    plt.figure(figsize=(12, 5))
-
-    plt.subplot(1, 3, 1)
-    plt.imshow(source)
-    plt.title("Source Image")
-    plt.axis('off')
-
-    plt.subplot(1, 3, 2)
-    plt.imshow(result.heatmap, cmap='hot')
-    plt.title("Match Heatmap")
-    plt.axis('off')
-
-    plt.subplot(1, 3, 3)
-    plt.imshow(source)
-    plt.imshow(result.heatmap, cmap='hot', alpha=0.5)
-    plt.title("Overlay")
-    plt.axis('off')
-
-    plt.tight_layout()
-    plt.savefig("match_visualization.png", dpi=300, bbox_inches='tight')
+report = build_report(result=result, config=engine.config,
+                      source_path="questioned.jpg", source_image=source)
+write_report(report, "report.json")
 ```
 
-#### Save and Load Index
+#### Save and Load an Index
 
 ```python
-from spade import ForensicsEngine
-
-# Index targets
 engine = ForensicsEngine()
-for i, target in enumerate(target_images):
-    engine.index_target(target, f"target_{i:04d}")
+for path in paths:
+    engine.index_target(load_image(path), path, image_path=path)
+engine.save("myindex")
 
-# Save index to disk
-engine.save_index("myindex")
-# Creates: myindex.index (FAISS binary) and myindex.meta.json (metadata)
-
-# Later: load the index
-engine2 = ForensicsEngine()
-engine2.load_index("myindex")
-
-# Now ready to match
-result = engine2.match(source_image)
+# Later, possibly in another process. Matching settings can be overridden;
+# patch size, stride and pyramid always come from the saved bundle.
+engine = ForensicsEngine.load("myindex", max_nfa=0.1)
+result = engine.match(source)
 ```
+
+Patches aren't stored in the bundle. They're re-extracted from `image_path` the
+first time a target is needed, so keep the indexed files where they were.
 
 ### REST API
 
@@ -282,28 +203,17 @@ BASE_URL = "http://localhost:8000"
 
 # Index a target
 with open("target.jpg", "rb") as f:
-    response = requests.post(
-        f"{BASE_URL}/index",
-        files={"file": f},
-        data={"image_id": "target_001"}
-    )
+    response = requests.post(f"{BASE_URL}/index", params={"image_id": "target_001"}, files={"file": f})
     print(response.json())
-    # {"success": true, "patches_indexed": 456789, ...}
 
 # Match a source
 with open("source.jpg", "rb") as f:
-    response = requests.post(
-        f"{BASE_URL}/match",
-        files={"file": f},
-        data={"return_heatmap": "true"}
-    )
-    result = response.json()
+    result = requests.post(f"{BASE_URL}/match", files={"file": f}).json()
 
-    if result["best_match"]:
-        match = result["best_match"]
-        print(f"Match found: {match['probability']:.3f}")
-        print(f"Target: {match['image_id']}")
-        print(f"Location: ({match['target_coord']['x']}, {match['target_coord']['y']})")
+if result["detected"]:
+    for region in result["coherent_regions"]:
+        if region["significant"]:
+            print(region["image_id"], region["source_bbox"], region["log10_nfa"])
 ```
 
 ### Environment Variables
@@ -311,28 +221,16 @@ with open("source.jpg", "rb") as f:
 Configure SPADE via environment variables:
 
 ```bash
-# Core settings
-export SPADE_PATCH_SIZE=3           # Patch size (3-6)
-export SPADE_STRIDE=1               # Patch stride
-export SPADE_DESCRIPTOR_DIM=256     # Feature dimension
-export SPADE_MIN_PROBABILITY=0.5    # Match threshold
-
-# Filtering
-export SPADE_ENTROPY_THRESHOLD=2.5  # Texture filter (higher = more aggressive)
-
-# Multi-scale
-export SPADE_PYRAMID_ENABLED=true   # Enable scale invariance
-export SPADE_PYRAMID_MIN_SIZE=16    # Min image dimension at smallest scale
-
-# Performance
-export SPADE_MAX_TARGETS=1000       # LRU cache limit (prevents memory exhaustion)
-export SPADE_K_NEIGHBORS=100        # ANN search results
-
-# Advanced
-export SPADE_LSH_ENABLED=true       # Enable LSH pre-filtering
-export SPADE_USE_GPU=true           # GPU acceleration (requires CuPy)
-export SPADE_DISTRIBUTED=true       # Distributed sharding
-export SPADE_NUM_SHARDS=4           # Number of shards
+export SPADE_PATCH_SIZE=5             # Patch size (3-16)
+export SPADE_STRIDE=1                 # Patch stride
+export SPADE_K_NEIGHBORS=8            # Nearest neighbours per source patch
+export SPADE_DISTANCE_THRESHOLD=0.5   # Max squared descriptor distance
+export SPADE_MIN_PROBABILITY=0.01     # Per-patch fit p-value floor
+export SPADE_NOISE_SIGMA=0.02         # Expected noise (0-1 scale)
+export SPADE_MAX_NFA=1.0              # Significance threshold for regions
+export SPADE_ENTROPY_THRESHOLD=       # Optional texture floor in bits (unset = off)
+export SPADE_PYRAMID_ENABLED=true     # Index targets at several scales
+export SPADE_MAX_TARGETS=1000         # Evict least recently indexed targets
 ```
 
 ### Deployment
@@ -399,146 +297,72 @@ spec:
           claimName: spade-pvc
 ```
 
-### Advanced Features
-
-#### Multi-Scale Pyramid (Scale Invariance)
-
-```python
-from spade import ForensicsEngine, Config
-
-config = Config(
-    pyramid_enabled=True,
-    pyramid_scales=[1.0, 0.5, 0.25, 0.125],
-    pyramid_min_size=16,
-)
-
-engine = ForensicsEngine(config)
-# Now detects fragments even if scaled
-```
-
-#### LSH Pre-Filtering (Faster Search)
-
-```python
-# Requires: pip install datasketch
-config = Config(
-    lsh_enabled=True,
-    lsh_threshold=0.3,          # Jaccard similarity threshold
-    lsh_candidates=1000,        # Pre-filter to top 1000 candidates
-)
-
-engine = ForensicsEngine(config)
-# 5-10x speedup on large indexes (>1M vectors)
-```
-
-#### GPU Acceleration
-
-```python
-# Requires: pip install cupy-cuda11x (match your CUDA version)
-config = Config(
-    use_gpu=True,
-)
-
-engine = ForensicsEngine(config)
-# 2-5x speedup for patch extraction and search
-```
-
-#### Distributed Sharding (Scale-Out)
-
-```python
-from spade.search.distributed import ShardedIndex
-
-# Local mode: parallel search across shards
-index = ShardedIndex(num_shards=4, mode="local")
-
-# Remote mode: search across multiple servers
-index = ShardedIndex(num_shards=4, mode="remote")
-index.configure_remote([
-    "http://shard0:8000",
-    "http://shard1:8000",
-    "http://shard2:8000",
-    "http://shard3:8000",
-])
-
-# Use like normal index
-engine.index = index
-```
-
 ## How it works
 
-1. Extract small patches from images
-2. Filter out uniform regions (sky, walls) using entropy
-3. Compute photometric-invariant descriptors
-4. Search with FAISS
-5. Verify matches with affine color model (Huber loss for robustness)
-6. Score with chi-square probability
+1. Extract every patch (default 5x5) and drop flat ones.
+2. Describe each patch by its normalized luminance pattern: grey levels minus
+   their mean, scaled to unit length. Brightness and contrast drop out, and mild
+   color grades barely move it. Luminance is used because JPEG keeps it at full
+   resolution while it subsamples color.
+3. Exact nearest-neighbour search (FAISS), batched.
+4. Per-patch pre-filter: fit grey-level gain and offset, chi-square test the
+   residual. Pixels clipped at 0 or 255 are ignored, since a recolor that
+   saturates breaks the model there.
+5. Cluster the surviving matches by translation, per target image and scale.
+6. For each cluster, fit one 3x3 color transform over all its pixels, keep the
+   patches whose luminance agrees with it, and compute the region's NFA:
+   how many regions this consistent you'd expect by chance, given how often
+   patches matched at all.
 
-The system handles:
-- Brightness/contrast changes
-- Color shifts
-- Gamma adjustments
-- JPEG artifacts
+Handles brightness, contrast, color grading (any affine color transform),
+JPEG recompression and, with the pyramid, downscaled copies. It does not handle
+rotation or non-uniform geometric distortion.
 
-It does NOT handle rotation, blur, or geometric distortion.
+A significant NFA means "not chance", which isn't the same as "copied":
+content that is genuinely identical by design (the same logo, text glyphs,
+identically drawn shapes) matches for real and will be reported. Look at the
+region before concluding.
+
+## Benchmark
+
+`python -m spade.bench.runner` builds synthetic recolored splices with exact
+ground truth (96x96 images, 24x24 splice, color grade 0.15, 20 spliced + 20
+clean pairs) and compares SPADE with a RootSIFT + RANSAC baseline:
+
+| | IoU | Precision | Recall | Detection AUC | s / image |
+|---|---|---|---|---|---|
+| SPADE, uncompressed | 0.85 | 0.95 | 0.89 | 0.96 | 0.6 |
+| SPADE, JPEG q85 | 0.78 | 0.97 | 0.81 | 0.95 | 0.6 |
+| RootSIFT + RANSAC, uncompressed | 0.00 | 0.70 | 0.00 | 0.75 | 0.1 |
+
+The clean pairs contain hard-edged disks, and two disks of the same radius are
+pixel-identical, so some "false" detections there are real matches (see the
+note above). Synthetic data is a sanity check, not a substitute for a real forensic
+dataset.
 
 ## Project structure
 
 ```
 src/spade/
-    extraction/    # patch extraction, entropy filtering, image pyramids
-    descriptors/   # difference vectors, chromaticity, LBP, rank-order, gradient
-    search/        # FAISS index wrapper, LSH pre-filtering
-    verification/  # affine solver, probability model, spatial coherence
-    aggregation/   # heatmap generation
+    extraction/    # patch extraction, entropy, image pyramids
+    descriptors/   # luminance-pattern descriptor
+    search/        # FAISS index (exact, with real deletes)
+    verification/  # affine color fit, chi-square test, coherence, NFA
+    aggregation/   # heatmap, localization
+    bench/         # synthetic benchmark
     engine.py      # main API
+    report.py      # versioned JSON forensic report
     cli.py         # command line interface
     api.py         # REST API (FastAPI)
 ```
 
-## Configuration
-
-Key parameters in `Config`:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| patch_size | 3 | Patch size (3, 4, 5, or 6) |
-| entropy_threshold | 2.5 | Filter low-texture patches (None to disable) |
-| min_probability | 0.5 | Match probability threshold |
-| noise_sigma | 0.02 | Expected image noise level |
-| auto_train_pca | True | Auto-train PCA on indexed patches |
-
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Lint
+pip install -e ".[dev,api,bench]"
+pytest tests/
 ruff check src/
 ```
-
-## Roadmap
-
-**Done (Phase 1)**
-- 3x3 to 6x6 patches with spatial pooling
-- Entropy filtering (adaptive bins)
-- Huber loss verification (robust to JPEG)
-- Auto PCA training
-- CLI + Python API
-- Spatial coherence verification
-
-**Done (Phase 2)**
-- 256-dim descriptors
-- Image pyramids for scale invariance
-- LSH pre-filtering (optional, requires datasketch)
-- REST API (FastAPI)
-
-**Future (Phase 3)**
-- GPU acceleration (CuPy, FAISS-GPU)
-- Learned descriptors (PyTorch)
-- Distributed search
 
 ## License
 

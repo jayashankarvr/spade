@@ -78,7 +78,9 @@ class TestBuildReport:
         loc = report["result"]["localization"]
         assert loc is not None
         assert "bbox" in loc and "detection_score" in loc
-        assert 0.0 <= loc["detection_score"] <= 1.0
+        assert 0.0 <= loc["area_fraction"] <= 1.0
+        # hand-built result: no NFA was computed, so there is no detection score
+        assert loc["detection_score"] is None
 
     def test_localization_absent_without_source_image(self):
         report = build_report(result=_result([]), config=Config())
@@ -136,3 +138,34 @@ class TestBuildReport:
             result=_result([]), config=Config(), generated_at="2026-01-01T00:00:00+00:00"
         )
         assert report["generated_at"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestSignificanceFields:
+    def test_region_nfa_and_detected(self):
+        matches = [_match(), _match()]
+        region = CoherentRegion(
+            offset=(9, 18),
+            matches=matches,
+            source_bbox=(1, 2, 3, 3),
+            target_bbox=(10, 20, 3, 3),
+            confidence=0.88,
+            image_id="target",
+            color_M=np.eye(3),
+            color_b=np.zeros(3),
+            log10_nfa=-4.2,
+        )
+        result = MatchResult(
+            matches=matches,
+            best_match=matches[0],
+            heatmap=None,
+            coherent_regions=[region],
+            stats={},
+        )
+        report = build_report(result=result, config=Config(), source_image=np.zeros((8, 8, 3), np.uint8),
+                              compute_cues=False)
+        assert report["result"]["detected"] is True
+        r = report["result"]["coherent_regions"][0]
+        assert r["significant"] is True and r["log10_nfa"] == -4.2
+        assert r["color_transform"]["is_identity"] is True
+        assert report["result"]["localization"]["detection_score"] == 4.2
+        assert "fit_p_value" in report["result"]["best_match"]

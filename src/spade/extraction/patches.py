@@ -5,17 +5,13 @@ from typing import Optional
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-from spade.logging_config import get_logger
 
-logger = get_logger("extraction.patches")
+ENTROPY_BINS = 8
 
-try:
-    from spade.acceleration import CUPY_AVAILABLE
-    from spade.acceleration.cupy_ops import compute_entropy_batch_gpu
-    import cupy as cp
-except ImportError:
-    CUPY_AVAILABLE = False
-    cp = None
+
+def max_entropy(size: int) -> float:
+    """Largest entropy (bits) a size x size patch can reach with ENTROPY_BINS bins."""
+    return float(np.log2(min(ENTROPY_BINS, size * size)))
 
 
 @dataclass
@@ -40,27 +36,23 @@ class PatchExtractor:
         self,
         size: int = 3,
         stride: int = 1,
-        entropy_threshold: Optional[float] = 2.5,
-        use_gpu: bool = False,
+        entropy_threshold: Optional[float] = None,
     ):
         """
         Args:
             size: Patch size (e.g., 3 for 3x3)
             stride: Extraction stride
-            entropy_threshold: Minimum entropy to keep patch (None to disable)
-            use_gpu: Use GPU acceleration if available (requires CuPy)
+            entropy_threshold: Minimum entropy (bits) to keep a patch, None to
+                disable. Must be below ``max_entropy(size)`` or nothing survives.
         """
         self.size = size
         self.stride = stride
+        if entropy_threshold is not None and entropy_threshold >= max_entropy(size):
+            raise ValueError(
+                f"entropy_threshold {entropy_threshold} can never be reached by a {size}x{size} "
+                f"patch (max {max_entropy(size):.2f} bits)"
+            )
         self.entropy_threshold = entropy_threshold
-        # Adaptive bins based on patch size (fewer bins for smaller patches)
-        self._entropy_bins = min(8, size * size)
-
-        # GPU support with graceful fallback
-        self.use_gpu = use_gpu
-        if use_gpu and not CUPY_AVAILABLE:
-            logger.warning("CuPy not available, falling back to CPU")
-            self.use_gpu = False
 
     def extract(self, image: np.ndarray) -> PatchCollection:
         """
@@ -139,36 +131,18 @@ class PatchExtractor:
         return image
 
     def _compute_entropy_batch(self, patches: np.ndarray) -> np.ndarray:
-        """Compute Shannon entropy for batch of patches."""
+        """Shannon entropy (bits) of each patch's grey-level histogram."""
         n = len(patches)
         if n == 0:
             return np.array([], dtype=np.float32)
-
-        # Use GPU if enabled
-        if self.use_gpu and CUPY_AVAILABLE:
-            patches_gpu = cp.asarray(patches)
-            entropy_gpu = compute_entropy_batch_gpu(patches_gpu, self._entropy_bins)
-            return cp.asnumpy(entropy_gpu)
-
-        # CPU implementation
-        # Convert to grayscale
         gray = (
-            0.299 * patches[:, :, :, 0]
-            + 0.587 * patches[:, :, :, 1]
-            + 0.114 * patches[:, :, :, 2]
-        )
-        # gray shape: (N, size, size)
-
-        # Flatten spatial dimensions
-        gray_flat = gray.reshape(n, -1)
-
-        # Compute histograms for all patches
-        entropies = np.zeros(n, dtype=np.float32)
-        for i in range(n):
-            hist, _ = np.histogram(gray_flat[i], bins=self._entropy_bins, range=(0, 1))
-            hist = hist / (hist.sum() + 1e-10)
-            # Shannon entropy with proper handling of zero bins
-            nonzero = hist > 0
-            entropies[i] = -np.sum(hist[nonzero] * np.log2(hist[nonzero]))
-
-        return entropies
+            0.299 * patches[..., 0] + 0.587 * patches[..., 1] + 0.114 * patches[..., 2]
+        ).reshape(n, -1)
+        bins = np.clip((gray * ENTROPY_BINS).astype(np.int64), 0, ENTROPY_BINS - 1)
+        # One bincount over (row, bin) pairs gives every histogram at once.
+        flat = bins + (np.arange(n, dtype=np.int64) * ENTROPY_BINS)[:, None]
+        hist = np.bincount(flat.ravel(), minlength=n * ENTROPY_BINS).reshape(n, ENTROPY_BINS)
+        prob = hist / gray.shape[1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            terms = np.where(prob > 0, prob * np.log2(prob), 0.0)
+        return (-terms.sum(axis=1)).astype(np.float32)

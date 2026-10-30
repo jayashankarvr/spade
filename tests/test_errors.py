@@ -25,6 +25,26 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="noise_sigma must be > 0"):
             Config(noise_sigma=0)
 
+    def test_unreachable_entropy_threshold_rejected(self):
+        # The old README example (3.0 bits on 3x3) silently dropped every patch.
+        with pytest.raises(ValueError, match="nothing would pass"):
+            Config(patch_size=3, entropy_threshold=3.0)
+        Config(patch_size=3, entropy_threshold=2.0)
+
+    def test_invalid_max_nfa(self):
+        with pytest.raises(ValueError, match="max_nfa"):
+            Config(max_nfa=0)
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("SPADE_PATCH_SIZE", "6")
+        monkeypatch.setenv("SPADE_ENTROPY_THRESHOLD", "1.5")
+        config = Config()
+        assert config.patch_size == 6 and config.entropy_threshold == 1.5
+
+    def test_config_dict_roundtrip(self):
+        config = Config(patch_size=4, max_nfa=0.1)
+        assert Config.from_dict(config.to_dict()) == config
+
     def test_valid_config(self):
         config = Config(patch_size=4, stride=2, min_probability=0.7)
         assert config.patch_size == 4
@@ -81,7 +101,7 @@ class TestEdgeCases:
         assert result.best_match is None
 
     def test_very_small_source(self):
-        engine = ForensicsEngine(Config(entropy_threshold=None))
+        engine = ForensicsEngine(Config(patch_size=3, entropy_threshold=None))
         target = np.random.rand(50, 50, 3).astype(np.float32)
         source = np.random.rand(3, 3, 3).astype(np.float32)  # Minimum size
 

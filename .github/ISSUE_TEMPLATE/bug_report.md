@@ -39,6 +39,4 @@ Add any other context about the problem here.
 
 **Optional dependencies installed:**
 - [ ] API (FastAPI): `pip list | grep fastapi`
-- [ ] LSH: `pip list | grep datasketch`
-- [ ] GPU: `pip list | grep cupy`
-- [ ] Learned descriptors: `pip list | grep torch`
+- [ ] Benchmark (OpenCV): `pip list | grep opencv`

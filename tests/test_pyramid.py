@@ -158,7 +158,8 @@ class TestPyramidWithEngine:
 
         # Should have indexed patches from both levels
         assert count > 0
-        assert "test" in engine._target_pyramid_patches
+        assert engine.has_target("test")
+        assert engine.index.count("test") == count
 
     def test_pyramid_matching(self):
         """Engine should match across scales."""
@@ -185,8 +186,8 @@ class TestPyramidWithEngine:
         # Should find some matches
         assert len(result.matches) > 0
 
-    def test_effective_size_in_matches(self):
-        """Matches should have effective patch size based on scale."""
+    def test_scale_recorded_in_matches(self):
+        """Matches record which pyramid level the target patch came from."""
         from spade import ForensicsEngine, Config
 
         config = Config(
@@ -205,8 +206,26 @@ class TestPyramidWithEngine:
 
         result = engine.match(target)
 
-        if result.matches:
-            # Matches from scale 0.5 should have effective size 6
-            sizes = set(m.patch_size for m in result.matches)
-            # Should include both 3 (from scale 1.0) and 6 (from scale 0.5)
-            assert 3 in sizes or 6 in sizes
+        # patch_size is the source patch; the level a match came from is target_scale
+        assert result.matches
+        assert {m.patch_size for m in result.matches} == {3}
+        assert {m.target_scale for m in result.matches} <= {1.0, 0.5}
+
+    def test_downscaled_copy_found_at_matching_level(self):
+        """A copy pasted at half size clusters at the 0.5 level of the target pyramid."""
+        from PIL import Image
+        from spade import ForensicsEngine, Config
+        from spade.bench.synthetic import make_negative_pair
+
+        target = make_negative_pair(seed=3, image_size=128).donor
+        crop = target[32:96, 32:96]
+        source = np.asarray(Image.fromarray(crop).resize((32, 32), Image.BOX))
+
+        engine = ForensicsEngine(Config(pyramid_enabled=True, pyramid_scales=[1.0, 0.5]))
+        engine.index_target(target, "target")
+        result = engine.match(source)
+
+        assert result.significant_regions
+        best = result.coherent_regions[0]
+        assert best.matches[0].target_scale == 0.5
+        assert abs(best.target_bbox[0] - 32) <= 4 and abs(best.target_bbox[1] - 32) <= 4

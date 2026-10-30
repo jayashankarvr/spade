@@ -3,20 +3,21 @@
 import io
 import base64
 import threading
+import uuid
 from typing import Optional, List, Dict, Any
 import numpy as np
 from PIL import Image
 
 try:
     from fastapi import FastAPI, File, UploadFile, HTTPException, Query
-    from fastapi.responses import JSONResponse
-    from pydantic import BaseModel, Field
+    from fastapi.concurrency import run_in_threadpool
+    from pydantic import BaseModel
     FASTAPI_AVAILABLE = True
 except ImportError:
     FASTAPI_AVAILABLE = False
 
 from spade import ForensicsEngine, Config, __version__
-from spade.exceptions import DependencyError
+from spade.exceptions import DependencyError, TargetExistsError
 
 # Security limits
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -39,15 +40,18 @@ class MatchInfo(BaseModel):
     source_coord: MatchCoord
     target_coord: MatchCoord
     patch_size: int
-    probability: float
+    fit_p_value: float   # per-patch goodness of fit, not a match probability
     image_id: str
 
 
 class CoherentRegionInfo(BaseModel):
     """Information about a coherent region."""
     offset: MatchCoord
+    image_id: str
     num_matches: int
     confidence: float
+    log10_nfa: Optional[float] = None   # < 0: expected less than once by chance
+    significant: bool
     source_bbox: Dict[str, int]
     target_bbox: Dict[str, int]
 
@@ -55,6 +59,7 @@ class CoherentRegionInfo(BaseModel):
 class MatchResponse(BaseModel):
     """Response from match endpoint."""
     success: bool
+    detected: bool
     best_match: Optional[MatchInfo] = None
     total_matches: int
     coherent_regions: List[CoherentRegionInfo] = []
@@ -68,18 +73,6 @@ class IndexResponse(BaseModel):
     image_id: str
     patches_indexed: int
     message: str
-
-
-class ConfigModel(BaseModel):
-    """API configuration model."""
-    patch_size: int = Field(default=3, ge=3, le=6)
-    stride: int = Field(default=1, ge=1)
-    entropy_threshold: Optional[float] = Field(default=2.5, ge=0)
-    descriptor_dim: int = Field(default=256, ge=64, le=512)
-    min_probability: float = Field(default=0.5, ge=0, le=1)
-    pyramid_enabled: bool = Field(default=False)
-    lsh_enabled: bool = Field(default=False)
-    coherence_enabled: bool = Field(default=True)
 
 
 async def validate_uploaded_image(file: UploadFile) -> np.ndarray:
@@ -153,8 +146,13 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
     # Initialize engine
     engine = ForensicsEngine(config or Config())
 
-    # Lock for thread-safe index operations
-    index_lock = threading.Lock()
+    # Index, delete and match all touch the engine's target table, so they take
+    # turns. The work itself runs in a worker thread to keep the event loop free.
+    engine_lock = threading.Lock()
+
+    def locked(fn, *args, **kwargs):
+        with engine_lock:
+            return fn(*args, **kwargs)
 
     # Track service start time for uptime calculation
     @app.on_event("startup")
@@ -235,11 +233,8 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             },
             "config": {
                 "patch_size": engine.config.patch_size,
-                "descriptor_dim": engine.config.descriptor_dim,
                 "pyramid_enabled": engine.config.pyramid_enabled,
-                "lsh_enabled": engine.config.lsh_enabled,
                 "coherence_enabled": engine.config.coherence_enabled,
-                "use_gpu": engine.config.use_gpu,
             }
         }
 
@@ -264,10 +259,11 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             "patch_size": engine.config.patch_size,
             "stride": engine.config.stride,
             "entropy_threshold": engine.config.entropy_threshold,
-            "descriptor_dim": engine.config.descriptor_dim,
+            "k_neighbors": engine.config.k_neighbors,
+            "distance_threshold": engine.config.distance_threshold,
             "min_probability": engine.config.min_probability,
+            "max_nfa": engine.config.max_nfa,
             "pyramid_enabled": engine.config.pyramid_enabled,
-            "lsh_enabled": engine.config.lsh_enabled,
             "coherence_enabled": engine.config.coherence_enabled,
         }
 
@@ -292,32 +288,25 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             if not image_id:
                 raise HTTPException(status_code=400, detail="Invalid image_id after sanitization")
         else:
-            # Generate ID needs to be inside lock to avoid duplicates
-            with index_lock:
-                image_id = f"img_{engine.target_count:04d}"
+            # Random rather than counter-based: a count reuses ids after deletes.
+            image_id = f"img_{uuid.uuid4().hex[:12]}"
 
-        # Use lock to prevent race condition between check and index
-        with index_lock:
-            # Check if already exists
-            if engine.has_target(image_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Image ID '{image_id}' already exists. Use a different ID or delete the existing one."
-                )
+        try:
+            count = await run_in_threadpool(locked, engine.index_target, image_array, image_id)
+        except TargetExistsError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Image ID '{image_id}' already exists. Use a different ID or delete the existing one."
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
 
-            try:
-                # Index the image
-                count = engine.index_target(image_array, image_id)
-
-                return IndexResponse(
-                    success=True,
-                    image_id=image_id,
-                    patches_indexed=count,
-                    message=f"Indexed {count} patches from {file.filename}",
-                )
-
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+        return IndexResponse(
+            success=True,
+            image_id=image_id,
+            patches_indexed=count,
+            message=f"Indexed {count} patches from {file.filename}",
+        )
 
     @app.post("/match", response_model=MatchResponse)
     async def match_image(
@@ -341,8 +330,9 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             if target_ids:
                 target_id_list = [t.strip() for t in target_ids.split(",")]
 
-            # Run matching
-            result = engine.match(
+            result = await run_in_threadpool(
+                locked,
+                engine.match,
                 image_array,
                 target_ids=target_id_list,
                 return_heatmap=return_heatmap,
@@ -361,7 +351,7 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
                         y=result.best_match.target_coord[1],
                     ),
                     patch_size=result.best_match.patch_size,
-                    probability=result.best_match.probability,
+                    fit_p_value=result.best_match.probability,
                     image_id=result.best_match.image_id,
                 )
 
@@ -370,8 +360,11 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             for region in result.coherent_regions:
                 regions_info.append(CoherentRegionInfo(
                     offset=MatchCoord(x=region.offset[0], y=region.offset[1]),
+                    image_id=region.image_id,
                     num_matches=len(region.matches),
                     confidence=region.confidence,
+                    log10_nfa=region.log10_nfa,
+                    significant=region.significant,
                     source_bbox={
                         "x": region.source_bbox[0],
                         "y": region.source_bbox[1],
@@ -398,6 +391,7 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
 
             return MatchResponse(
                 success=True,
+                detected=bool(result.significant_regions),
                 best_match=best_match_info,
                 total_matches=len(result.matches),
                 coherent_regions=regions_info,
@@ -428,20 +422,11 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
     @app.delete("/targets/{image_id}")
     async def delete_target(image_id: str):
         """
-        Remove a target from the index.
-
-        Note: Removes metadata only. Descriptors remain in FAISS but won't
-        match due to metadata filtering during search.
+        Remove a target and its descriptors from the index.
         """
-        with index_lock:
-            if not engine.remove_target(image_id):
-                raise HTTPException(status_code=404, detail=f"Target {image_id} not found")
-
-            return {
-                "success": True,
-                "message": f"Removed target {image_id}",
-                "note": "Descriptors remain in FAISS index but won't match",
-            }
+        if not await run_in_threadpool(locked, engine.remove_target, image_id):
+            raise HTTPException(status_code=404, detail=f"Target {image_id} not found")
+        return {"success": True, "message": f"Removed target {image_id}"}
 
     return app
 

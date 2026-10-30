@@ -1,32 +1,67 @@
-"""Main forensics engine that orchestrates the full pipeline."""
+"""Main forensics engine that orchestrates the full pipeline.
 
+Pipeline for ``match``:
+
+1. Extract source patches and describe them by their normalized luminance
+   pattern (``LuminanceDescriptor``).
+2. Batched exact k-NN search against every indexed target patch.
+3. Cheap per-patch check: fit grey-level gain and offset to each candidate pair
+   and keep those whose residual passes a chi-square test.
+4. Cluster surviving matches by translation (per target image and scale).
+5. For each cluster fit *one* 3x3 color transform over all of its pixels, keep
+   the patches whose luminance agrees with it, and score the region with an
+   a-contrario NFA.
+
+Step 5 is where the decision is made. A single patch says little on its own;
+a single transform shared by dozens of neighbouring patches at one offset is
+hard to get by accident, and the NFA says how hard. Residuals are tested on
+luminance because JPEG keeps it at full resolution while subsampling color.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
 import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from PIL import Image
 
-from spade.logging_config import get_logger
-from spade.extraction.patches import PatchExtractor, PatchCollection
+from spade.aggregation.heatmap import Match, SpatialAggregator
+from spade.aggregation.localize import Localization, localize_region
+from spade.descriptors.core import LUMA, LuminanceDescriptor, luminance
 from spade.exceptions import (
     ConfigurationError,
-    InvalidImageError,
     ImageSizeError,
-    TargetNotFoundError,
+    IndexStoreError,
+    InvalidImageError,
     TargetExistsError,
 )
+from spade.extraction.patches import PatchExtractor, max_entropy
+from spade.extraction.pyramid import ImagePyramid
+from spade.logging_config import get_logger
+from spade.search.index import ANNIndex
+from spade.verification.affine import AffineVerifier, fit_gain_offset_batch
+from spade.verification.coherence import (
+    CoherentRegion,
+    SpatialCoherenceVerifier,
+    make_region,
+)
+from spade.verification.nfa import log10_nfa, overlap_factor
+from spade.verification.probability import ProbabilityModel
 
 logger = get_logger("engine")
-from spade.extraction.pyramid import ImagePyramid, PyramidPatchCollection
-from spade.descriptors.core import CompositeDescriptor
-from spade.search.index import ANNIndex
-from spade.search import LSH_AVAILABLE
-from spade.verification.affine import AffineVerifier
-from spade.verification.probability import ProbabilityModel
-from spade.verification.coherence import SpatialCoherenceVerifier, CoherentRegion
-from spade.aggregation.heatmap import SpatialAggregator, Match
+
+# Regions are verified biggest-first; past this many, the rest are tiny clusters
+# that couldn't reach significance anyway.
+_MAX_REGIONS = 100
+# Pixel pairs used for one region-level color fit. Plenty for 12 parameters.
+_MAX_FIT_PIXELS = 20000
+_FIT_CHUNK = 20000
+_BUNDLE_VERSION = 1
 
 
 def _env_int(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
@@ -148,153 +183,90 @@ def _env_bool(key: str, default: bool) -> bool:
         )
 
 
+def _env_optional_float(key: str, min_val: Optional[float] = None) -> Optional[float]:
+    """Float from the environment, or None when the variable is unset or empty."""
+    if not os.environ.get(key):
+        return None
+    return _env_float(key, 0.0, min_val=min_val)
+
+
 @dataclass
 class Config:
     """
     Configuration for the forensics engine.
 
-    All settings can be overridden via environment variables with SPADE_ prefix:
-    - SPADE_PATCH_SIZE, SPADE_STRIDE, SPADE_ENTROPY_THRESHOLD
-    - SPADE_DESCRIPTOR_DIM, SPADE_K_NEIGHBORS, SPADE_DISTANCE_THRESHOLD
-    - SPADE_MIN_PROBABILITY, SPADE_NOISE_SIGMA
-    - SPADE_PYRAMID_ENABLED, SPADE_LSH_ENABLED
+    Every field can be set through an environment variable with the SPADE_
+    prefix (SPADE_PATCH_SIZE, SPADE_K_NEIGHBORS, SPADE_MAX_NFA, ...).
     """
-    patch_size: int = field(default_factory=lambda: _env_int("SPADE_PATCH_SIZE", 3, min_val=3, max_val=16))
+    patch_size: int = field(default_factory=lambda: _env_int("SPADE_PATCH_SIZE", 5, min_val=3, max_val=16))
     stride: int = field(default_factory=lambda: _env_int("SPADE_STRIDE", 1, min_val=1))
-    entropy_threshold: Optional[float] = field(default_factory=lambda: _env_float("SPADE_ENTROPY_THRESHOLD", 2.5, min_val=0.0))
-    descriptor_dim: int = field(default_factory=lambda: _env_int("SPADE_DESCRIPTOR_DIM", 256, min_val=64, max_val=512))
-    descriptor_spatial_pooling: bool = field(default_factory=lambda: _env_bool("SPADE_DESCRIPTOR_POOLING", True))
-    k_neighbors: int = field(default_factory=lambda: _env_int("SPADE_K_NEIGHBORS", 100, min_val=1))
+    # Optional grey-level entropy floor in bits. Flat patches are always dropped by
+    # the descriptor, so this is only for pruning weakly textured ones.
+    entropy_threshold: Optional[float] = field(default_factory=lambda: _env_optional_float("SPADE_ENTROPY_THRESHOLD", min_val=0.0))
+    k_neighbors: int = field(default_factory=lambda: _env_int("SPADE_K_NEIGHBORS", 8, min_val=1))
+    # Squared L2 distance between descriptors (squared chordal distance between
+    # color subspaces).
     distance_threshold: float = field(default_factory=lambda: _env_float("SPADE_DISTANCE_THRESHOLD", 0.5, min_val=0.0))
-    min_probability: float = field(default_factory=lambda: _env_float("SPADE_MIN_PROBABILITY", 0.5, min_val=0.0, max_val=1.0))
+    # Per-patch chi-square p-value floor; the cheap pre-filter, not the decision.
+    min_probability: float = field(default_factory=lambda: _env_float("SPADE_MIN_PROBABILITY", 0.01, min_val=0.0, max_val=1.0))
     noise_sigma: float = field(default_factory=lambda: _env_float("SPADE_NOISE_SIGMA", 0.02, min_val=0.0))
     smoothing_sigma: float = field(default_factory=lambda: _env_float("SPADE_SMOOTHING_SIGMA", 2.0, min_val=0.0))
-    auto_train_pca: bool = field(default_factory=lambda: _env_bool("SPADE_AUTO_TRAIN_PCA", True))
-    pca_train_samples: int = field(default_factory=lambda: _env_int("SPADE_PCA_TRAIN_SAMPLES", 5000, min_val=100))
-    # Spatial coherence settings
+    # Region clustering and significance
     coherence_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_COHERENCE_ENABLED", True))
     coherence_offset_tolerance: int = field(default_factory=lambda: _env_int("SPADE_COHERENCE_OFFSET_TOLERANCE", 2, min_val=0))
     coherence_min_cluster: int = field(default_factory=lambda: _env_int("SPADE_COHERENCE_MIN_CLUSTER", 3, min_val=2))
-    scale_weights: Dict[int, float] = field(default_factory=lambda: {
-        3: 1.0, 4: 1.2, 5: 1.5, 6: 2.0
-    })
-    # Multi-scale pyramid settings
+    # A region is reported as significant when its NFA is below this.
+    max_nfa: float = field(default_factory=lambda: _env_float("SPADE_MAX_NFA", 1.0, min_val=0.0))
+    # Multi-scale pyramid (targets only)
     pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", False))
     pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])
     pyramid_min_size: int = field(default_factory=lambda: _env_int("SPADE_PYRAMID_MIN_SIZE", 16, min_val=3))
-    # LSH pre-filtering settings
-    lsh_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_LSH_ENABLED", False))
-    lsh_threshold: float = field(default_factory=lambda: _env_float("SPADE_LSH_THRESHOLD", 0.3, min_val=0.0, max_val=1.0))
-    lsh_candidates: int = field(default_factory=lambda: _env_int("SPADE_LSH_CANDIDATES", 1000, min_val=1))
-    # Phase 3: GPU acceleration
-    use_gpu: bool = field(default_factory=lambda: _env_bool("SPADE_USE_GPU", False))
-    # Phase 3: Learned descriptors
-    use_learned_descriptors: bool = field(default_factory=lambda: _env_bool("SPADE_LEARNED", False))
-    learned_model: str = field(default_factory=lambda: os.environ.get("SPADE_LEARNED_MODEL", "resnet18"))
-    # Phase 3: Distributed search
-    distributed_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_DISTRIBUTED", False))
-    num_shards: int = field(default_factory=lambda: _env_int("SPADE_NUM_SHARDS", 4, min_val=1))
-    # Memory management
+    # Memory management: least recently indexed targets are evicted past this.
     max_targets: Optional[int] = field(default_factory=lambda: _env_int("SPADE_MAX_TARGETS", 1000, min_val=1) if os.environ.get("SPADE_MAX_TARGETS") else None)
-    # Bayes-factor pipeline (Option-A)
-    scoring_mode: str = field(default_factory=lambda: os.environ.get("SPADE_SCORING_MODE", "chi2"))
-    aggregation_mode: str = field(default_factory=lambda: os.environ.get("SPADE_AGGREGATION_MODE", "translation_cluster"))
-    priors_dir: Optional[str] = field(default_factory=lambda: os.environ.get("SPADE_PRIORS_DIR"))
-
-    def _validate_combinations(self):
-        """Validate configuration combinations that require multiple settings."""
-        # Import availability flags
-        from spade.search import LSH_AVAILABLE
-        from spade.descriptors import TORCH_AVAILABLE
-        from spade.acceleration.backend import CUPY_AVAILABLE
-
-        # LSH requires datasketch
-        if self.lsh_enabled and not LSH_AVAILABLE:
-            raise ConfigurationError(
-                "LSH pre-filtering enabled but datasketch not installed. "
-                "Install with: pip install datasketch"
-            )
-
-        # Learned descriptors require PyTorch
-        if self.use_learned_descriptors and not TORCH_AVAILABLE:
-            raise ConfigurationError(
-                "Learned descriptors enabled but PyTorch not installed. "
-                "Install with: pip install torch torchvision"
-            )
-
-        # GPU acceleration requires CuPy
-        if self.use_gpu and not CUPY_AVAILABLE:
-            raise ConfigurationError(
-                "GPU acceleration enabled but CuPy not installed. "
-                "Install with: pip install cupy-cuda11x (match your CUDA version)"
-            )
-
-        # Validate pyramid scales
-        if self.pyramid_enabled:
-            if not all(scale > 0 for scale in self.pyramid_scales):
-                raise ConfigurationError(
-                    f"All pyramid_scales must be > 0, got {self.pyramid_scales}"
-                )
-            if 1.0 not in self.pyramid_scales:
-                raise ConfigurationError(
-                    f"pyramid_scales must include 1.0 (original scale), got {self.pyramid_scales}"
-                )
-
-        # Descriptor dimension must be reasonable for patch size
-        min_dim = self.patch_size * self.patch_size * 3  # RGB channels
-        if self.descriptor_dim < min_dim:
-            raise ConfigurationError(
-                f"descriptor_dim ({self.descriptor_dim}) is too small for patch_size {self.patch_size}x{self.patch_size}. "
-                f"Minimum: {min_dim} (patch pixels)"
-            )
-
-        # Distributed search requires reasonable shard count
-        if self.distributed_enabled:
-            if self.num_shards < 2:
-                raise ConfigurationError(
-                    f"Distributed search requires num_shards >= 2, got {self.num_shards}. "
-                    f"Use single index if not distributing."
-                )
-
-        # k_neighbors should be reasonable for lsh_candidates
-        if self.lsh_enabled and self.k_neighbors > self.lsh_candidates:
-            raise ConfigurationError(
-                f"k_neighbors ({self.k_neighbors}) cannot exceed lsh_candidates ({self.lsh_candidates}). "
-                f"LSH pre-filter would eliminate valid results."
-            )
 
     def __post_init__(self):
-        # Validate patch_size (multi-size support: 3..16)
         if not (3 <= self.patch_size <= 16):
             raise ConfigurationError(f"patch_size must be between 3 and 16, got {self.patch_size}")
-        # Validate stride
         if self.stride < 1:
             raise ConfigurationError(f"stride must be >= 1, got {self.stride}")
-        # Validate probability thresholds
+        if self.k_neighbors < 1:
+            raise ConfigurationError(f"k_neighbors must be >= 1, got {self.k_neighbors}")
         if not 0 <= self.min_probability <= 1:
             raise ConfigurationError(f"min_probability must be 0-1, got {self.min_probability}")
-        # Validate noise_sigma
         if self.noise_sigma <= 0:
             raise ConfigurationError(f"noise_sigma must be > 0, got {self.noise_sigma}")
-        # Validate pyramid settings
-        if self.pyramid_enabled and len(self.pyramid_scales) == 0:
-            raise ConfigurationError("pyramid_scales must not be empty when pyramid_enabled")
-        # Validate LSH settings
-        if not 0 < self.lsh_threshold <= 1:
-            raise ConfigurationError(f"lsh_threshold must be (0, 1], got {self.lsh_threshold}")
-        if self.lsh_candidates < 1:
-            raise ConfigurationError(f"lsh_candidates must be >= 1, got {self.lsh_candidates}")
-        # Validate coherence settings
+        if self.max_nfa <= 0:
+            raise ConfigurationError(f"max_nfa must be > 0, got {self.max_nfa}")
+        if self.entropy_threshold is not None:
+            ceiling = max_entropy(self.patch_size)
+            if not 0 <= self.entropy_threshold < ceiling:
+                raise ConfigurationError(
+                    f"entropy_threshold must be in [0, {ceiling:.2f}) for {self.patch_size}x{self.patch_size} "
+                    f"patches, got {self.entropy_threshold} (nothing would pass)"
+                )
         if self.coherence_offset_tolerance < 0:
             raise ConfigurationError(f"coherence_offset_tolerance must be >= 0, got {self.coherence_offset_tolerance}")
-        if self.coherence_min_cluster < 1:
-            raise ConfigurationError(f"coherence_min_cluster must be >= 1, got {self.coherence_min_cluster}")
-        # Validate memory management
+        if self.coherence_min_cluster < 2:
+            raise ConfigurationError(f"coherence_min_cluster must be >= 2, got {self.coherence_min_cluster}")
+        if self.pyramid_enabled:
+            if not self.pyramid_scales:
+                raise ConfigurationError("pyramid_scales must not be empty when pyramid_enabled")
+            if not all(scale > 0 for scale in self.pyramid_scales):
+                raise ConfigurationError(f"All pyramid_scales must be > 0, got {self.pyramid_scales}")
+            if 1.0 not in self.pyramid_scales:
+                raise ConfigurationError(f"pyramid_scales must include 1.0 (original scale), got {self.pyramid_scales}")
         if self.max_targets is not None and self.max_targets < 1:
             raise ConfigurationError(f"max_targets must be >= 1 or None, got {self.max_targets}")
 
-        # Validate configuration combinations
-        self._validate_combinations()
+    def to_dict(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], **overrides) -> "Config":
+        known = {f.name for f in dataclasses.fields(cls)}
+        values = {k: v for k, v in data.items() if k in known}
+        values.update(overrides)
+        return cls(**values)
 
 
 @dataclass
@@ -305,6 +277,30 @@ class MatchResult:
     heatmap: Optional[np.ndarray]
     coherent_regions: List[CoherentRegion]
     stats: Dict[str, Any]
+    # Footprint of the significant regions in source coordinates.
+    localization: Optional[Localization] = None
+
+    @property
+    def significant_regions(self) -> List[CoherentRegion]:
+        return [r for r in self.coherent_regions if r.significant]
+
+
+@dataclass
+class _Target:
+    """What we keep per indexed image. ``patches`` may be dropped and reloaded from ``path``."""
+    shape: Tuple[int, int]
+    path: Optional[str]
+    patches: Optional[np.ndarray] = None   # (N, s, s, 3) float32, aligned with the index
+    coords: Optional[np.ndarray] = None    # (N, 2) full-resolution (x, y)
+    scales: Optional[np.ndarray] = None    # (N,) pyramid scale of each patch
+
+
+@dataclass
+class _Candidates:
+    """Verified per-patch matches, as parallel arrays (one row per match)."""
+    src_idx: np.ndarray
+    tgt_idx: np.ndarray
+    matches: List[Match]
 
 
 class ForensicsEngine:
@@ -315,119 +311,37 @@ class ForensicsEngine:
         engine = ForensicsEngine()
         engine.index_target(target_image, "target_id")
         result = engine.match(source_image)
+        for region in result.significant_regions:
+            print(region.image_id, region.offset, region.log10_nfa)
     """
 
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
-
-        # Patch extraction (with optional GPU acceleration)
         self.extractor = PatchExtractor(
             size=self.config.patch_size,
             stride=self.config.stride,
             entropy_threshold=self.config.entropy_threshold,
-            use_gpu=self.config.use_gpu,
         )
-
-        # Descriptor computation (learned or mathematical)
-        if self.config.use_learned_descriptors:
-            from spade.descriptors import LearnedDescriptor, TORCH_AVAILABLE
-            if TORCH_AVAILABLE and LearnedDescriptor is not None:
-                self.descriptor = LearnedDescriptor(
-                    model_name=self.config.learned_model,
-                    target_dim=self.config.descriptor_dim,
-                    use_gpu=self.config.use_gpu,
-                )
-            else:
-                logger.warning(
-                    "Learned descriptors requested but PyTorch not available. "
-                    "Install with: pip install spade-forensics[learned]. "
-                    "Falling back to mathematical descriptors."
-                )
-                self.descriptor = CompositeDescriptor(target_dim=self.config.descriptor_dim, spatial_pooling=self.config.descriptor_spatial_pooling)
-        else:
-            self.descriptor = CompositeDescriptor(target_dim=self.config.descriptor_dim, spatial_pooling=self.config.descriptor_spatial_pooling)
-
-        # Search index (distributed, hybrid LSH, or standard)
-        if self.config.distributed_enabled:
-            from spade.search.distributed import ShardedIndex
-            self.index = ShardedIndex(
-                dim=self.config.descriptor_dim,
-                num_shards=self.config.num_shards,
-                use_gpu=self.config.use_gpu,
-            )
-        elif self.config.lsh_enabled and LSH_AVAILABLE:
-            from spade.search.lsh import HybridIndex, LSHConfig
-            lsh_config = LSHConfig(threshold=self.config.lsh_threshold)
-            self.index = HybridIndex(dim=self.config.descriptor_dim, lsh_config=lsh_config)
-        elif self.config.lsh_enabled and not LSH_AVAILABLE:
-            logger.warning(
-                "LSH pre-filtering requested but datasketch not available. "
-                "Install with: pip install spade-forensics[lsh]. "
-                "Falling back to standard FAISS index."
-            )
-            self.index = ANNIndex(dim=self.config.descriptor_dim, use_gpu=self.config.use_gpu)
-        else:
-            self.index = ANNIndex(dim=self.config.descriptor_dim, use_gpu=self.config.use_gpu)
-
+        self.descriptor = LuminanceDescriptor(self.config.patch_size)
+        self.index = ANNIndex(dim=self.descriptor.dim)
         self.verifier = AffineVerifier(noise_sigma=self.config.noise_sigma)
         self.probability_model = ProbabilityModel(noise_sigma=self.config.noise_sigma)
-        self.aggregator = SpatialAggregator(
-            scale_weights=self.config.scale_weights,
-            smoothing_sigma=self.config.smoothing_sigma,
-        )
+        self.aggregator = SpatialAggregator(smoothing_sigma=self.config.smoothing_sigma)
         self.coherence_verifier = SpatialCoherenceVerifier(
             offset_tolerance=self.config.coherence_offset_tolerance,
             min_cluster_size=self.config.coherence_min_cluster,
-            min_cluster_probability=self.config.min_probability,
         )
-
-        # Multi-scale pyramid (Phase 2)
         self.pyramid: Optional[ImagePyramid] = None
         if self.config.pyramid_enabled:
             self.pyramid = ImagePyramid(
                 scales=self.config.pyramid_scales,
                 min_size=self.config.pyramid_min_size,
             )
+        self._targets: "OrderedDict[str, _Target]" = OrderedDict()
 
-        # Store only paths and patches, not full images (memory efficient)
-        # Using OrderedDict for LRU eviction when max_targets is set
-        self._target_paths: OrderedDict[str, Optional[str]] = OrderedDict()
-        self._target_patches: OrderedDict[str, PatchCollection] = OrderedDict()
-        self._target_pyramid_patches: OrderedDict[str, PyramidPatchCollection] = OrderedDict()
-        self._target_shapes: OrderedDict[str, Tuple[int, int]] = OrderedDict()
-        self._pca_trained = False
-        self._pca_training_patches: List[np.ndarray] = []
-
-        # Bayes-factor pipeline (Option-A) - lazy-initialized on first use
-        self._bayes_engine = None
-
-    def _get_bayes_engine(self):
-        """Lazily construct the Bayes-factor engine when scoring_mode='bayes'."""
-        if self._bayes_engine is None:
-            from spade.engine_bayes import BayesianForensicsEngine, BayesianConfig
-            from pathlib import Path
-            self._bayes_engine = BayesianForensicsEngine(BayesianConfig(
-                stride=self.config.stride,
-                entropy_threshold=None,
-                k_neighbors=self.config.k_neighbors,
-                noise_sigma=self.config.noise_sigma,
-                priors_dir=Path(self.config.priors_dir) if self.config.priors_dir else None,
-            ))
-        return self._bayes_engine
-
-    def _evict_lru_if_needed(self) -> None:
-        """Evict least recently used target if max_targets limit reached."""
-        if self.config.max_targets is None:
-            return
-
-        while len(self._target_shapes) >= self.config.max_targets:
-            # Remove oldest (first) item from OrderedDict
-            oldest_id = next(iter(self._target_shapes))
-            logger.warning(
-                f"Max targets ({self.config.max_targets}) reached. "
-                f"Evicting oldest target: {oldest_id}"
-            )
-            self.remove_target(oldest_id)
+    # ------------------------------------------------------------------
+    # Indexing
+    # ------------------------------------------------------------------
 
     def index_target(
         self,
@@ -441,108 +355,62 @@ class ForensicsEngine:
         Args:
             image: RGB image as numpy array
             image_id: Unique identifier for this image
-            image_path: Optional file path for lazy loading during verification
+            image_path: Optional file path; lets a saved index reload the
+                image's patches later instead of keeping them in the bundle
 
         Returns:
-            Number of patches indexed
+            Number of patches indexed (flat patches are skipped)
 
-        Note:
-            If max_targets is set and limit is reached, the least recently
-            indexed target will be automatically evicted.
+        Raises:
+            TargetExistsError: if ``image_id`` is already indexed
         """
-        # Bayes-factor pipeline indexes through its own multi-scale machinery
-        if self.config.scoring_mode == "bayes":
-            engine = self._get_bayes_engine()
-            engine.index_target(image, image_id)
-            self._target_shapes[image_id] = (image.shape[0], image.shape[1])
-            self._target_paths[image_id] = image_path
-            return sum(
-                len(engine._target_patches[s].get(image_id, []))
-                for s in engine.cfg.patch_sizes
-            )
-
-        # Evict LRU target if memory limit reached
+        if image_id in self._targets:
+            raise TargetExistsError(f"Target '{image_id}' is already indexed")
+        image = self._normalize_image(image)
         self._evict_lru_if_needed()
 
-        image = self._normalize_image(image)
+        patches, coords, scales, descriptors = self._describe_target(image)
+        self.index.add(image_id, descriptors)
+        self._targets[image_id] = _Target(
+            shape=(int(image.shape[0]), int(image.shape[1])),
+            path=image_path,
+            patches=patches,
+            coords=coords,
+            scales=scales,
+        )
+        return len(patches)
 
-        # Use pyramid-based extraction if enabled
+    def _describe_target(self, image: np.ndarray):
+        """Patches, full-res coords, scales and descriptors for one target, flat patches removed."""
         if self.pyramid is not None:
-            return self._index_target_pyramid(image, image_id, image_path)
+            pyr = self.pyramid.extract_patches(image, self.extractor)
+            patches, coords, scales = pyr.patches, pyr.original_coords, pyr.scales
+        else:
+            col = self.extractor.extract(image)
+            patches, coords = col.patches, col.coords
+            scales = np.ones(len(patches), dtype=np.float32)
+        descriptors, keep = self.descriptor.compute_batch(patches)
+        return patches[keep], coords[keep], scales[keep], descriptors[keep]
 
-        patches = self.extractor.extract(image)
+    def _evict_lru_if_needed(self) -> None:
+        if self.config.max_targets is None:
+            return
+        while len(self._targets) >= self.config.max_targets:
+            oldest_id = next(iter(self._targets))
+            logger.warning(f"Max targets ({self.config.max_targets}) reached. Evicting oldest target: {oldest_id}")
+            self.remove_target(oldest_id)
 
-        if len(patches.patches) == 0:
-            return 0
+    def remove_target(self, image_id: str) -> bool:
+        """Remove a target and its descriptors. Returns False if it wasn't indexed."""
+        if image_id not in self._targets:
+            return False
+        del self._targets[image_id]
+        self.index.remove(image_id)
+        return True
 
-        # Collect patches for PCA training
-        if self.config.auto_train_pca and not self._pca_trained:
-            self._pca_training_patches.append(patches.patches)
-            total_patches = sum(len(p) for p in self._pca_training_patches)
-            if total_patches >= self.config.pca_train_samples:
-                self._train_pca()
-
-        descriptors = self.descriptor.compute_batch(patches.patches)
-
-        metadata = [
-            {"image_id": image_id, "coord": tuple(coord), "patch_idx": i}
-            for i, coord in enumerate(patches.coords)
-        ]
-
-        self.index.add(descriptors, metadata)
-        self._target_paths[image_id] = image_path
-        self._target_patches[image_id] = patches
-        self._target_shapes[image_id] = image.shape[:2]
-
-        return len(patches.patches)
-
-    def _index_target_pyramid(
-        self,
-        image: np.ndarray,
-        image_id: str,
-        image_path: Optional[str] = None,
-    ) -> int:
-        """Index target using multi-scale pyramid."""
-        pyramid_patches = self.pyramid.extract_patches(image, self.extractor)
-
-        if len(pyramid_patches.patches) == 0:
-            return 0
-
-        # Collect patches for PCA training
-        if self.config.auto_train_pca and not self._pca_trained:
-            self._pca_training_patches.append(pyramid_patches.patches)
-            total_patches = sum(len(p) for p in self._pca_training_patches)
-            if total_patches >= self.config.pca_train_samples:
-                self._train_pca()
-
-        descriptors = self.descriptor.compute_batch(pyramid_patches.patches)
-
-        # Metadata includes pyramid level and scale for coordinate mapping
-        metadata = [
-            {
-                "image_id": image_id,
-                "coord": tuple(pyramid_patches.coords[i]),
-                "original_coord": tuple(pyramid_patches.original_coords[i]),
-                "patch_idx": i,
-                "level": int(pyramid_patches.levels[i]),
-                "scale": float(pyramid_patches.scales[i]),
-            }
-            for i in range(len(pyramid_patches.patches))
-        ]
-
-        self.index.add(descriptors, metadata)
-        self._target_paths[image_id] = image_path
-        self._target_pyramid_patches[image_id] = pyramid_patches
-        self._target_shapes[image_id] = image.shape[:2]
-
-        return len(pyramid_patches.patches)
-
-    def _train_pca(self) -> None:
-        """Train PCA on collected patches."""
-        all_patches = np.concatenate(self._pca_training_patches, axis=0)
-        self.descriptor.train_pca(all_patches, self.config.pca_train_samples)
-        self._pca_trained = True
-        self._pca_training_patches = []  # Free memory
+    # ------------------------------------------------------------------
+    # Matching
+    # ------------------------------------------------------------------
 
     def match(
         self,
@@ -556,138 +424,267 @@ class ForensicsEngine:
         Args:
             source_image: RGB image to search for
             target_ids: Optional list of specific targets to match against
-            return_heatmap: Whether to generate aggregated heatmap
+            return_heatmap: Whether to generate a target heatmap for the best match
 
         Returns:
-            MatchResult with matches and optional heatmap
+            MatchResult. ``coherent_regions`` are sorted most significant first;
+            use ``significant_regions`` for the ones with NFA < max_nfa.
         """
-        # Dispatch to Bayes-factor pipeline when configured
-        if self.config.scoring_mode == "bayes":
-            engine = self._get_bayes_engine()
-            br = engine.match(source_image, return_heatmap=return_heatmap)
-            return MatchResult(
-                matches=br.matches,
-                best_match=br.best_match,
-                heatmap=br.heatmap,
-                coherent_regions=[],
-                stats={**br.stats, "log_z": br.log_z},
-            )
-
         source_image = self._normalize_image(source_image)
-        source_patches = self.extractor.extract(source_image)
+        source_shape = (int(source_image.shape[0]), int(source_image.shape[1]))
+        collection = self.extractor.extract(source_image)
+        descriptors, keep = self.descriptor.compute_batch(collection.patches)
+        src_patches, src_coords, descriptors = collection.patches[keep], collection.coords[keep], descriptors[keep]
 
-        if len(source_patches.patches) == 0:
-            return MatchResult(
-                matches=[],
-                best_match=None,
-                heatmap=None,
-                coherent_regions=[],
-                stats={"source_patches": 0, "total_matches": 0, "coherent_regions": 0},
+        if len(src_patches) == 0 or self.index.size == 0:
+            return MatchResult([], None, None, [], self._stats(len(src_patches), 0, []))
+
+        candidates, verified_per_target = self._verified_candidates(
+            src_patches, src_coords, descriptors, target_ids
+        )
+        matches = candidates.matches
+
+        regions: List[CoherentRegion] = []
+        if self.config.coherence_enabled and matches:
+            regions = self._significant_regions(
+                candidates, src_patches, src_coords, source_shape, verified_per_target
             )
-
-        source_descriptors = self.descriptor.compute_batch(source_patches.patches)
-        dof = self.probability_model.compute_dof(self.config.patch_size)
-
-        all_matches = []
-
-        for i, (descriptor, source_patch) in enumerate(
-            zip(source_descriptors, source_patches.patches)
-        ):
-            source_coord = tuple(source_patches.coords[i])
-            search_results = self.index.search(
-                descriptor, self.config.k_neighbors, lsh_candidates=self.config.lsh_candidates
-            )
-
-            for result in search_results:
-                image_id = result.metadata.get("image_id", "")
-
-                if target_ids is not None and image_id not in target_ids:
-                    continue
-                if result.distance > self.config.distance_threshold:
-                    continue
-
-                # Check if target was indexed with pyramid or regular extraction
-                is_pyramid = image_id in self._target_pyramid_patches
-                is_regular = image_id in self._target_patches
-
-                if not is_pyramid and not is_regular:
-                    continue
-
-                patch_idx = result.metadata.get("patch_idx", 0)
-
-                if is_pyramid:
-                    # Pyramid-indexed target
-                    target_pyr = self._target_pyramid_patches[image_id]
-                    if patch_idx >= len(target_pyr.patches):
-                        continue
-
-                    target_patch = target_pyr.patches[patch_idx]
-                    # Use original coordinates (mapped back to full-res image)
-                    target_coord = tuple(target_pyr.original_coords[patch_idx])
-                    target_scale = target_pyr.scales[patch_idx]
-                else:
-                    # Regular target
-                    target_patches = self._target_patches[image_id]
-                    if patch_idx >= len(target_patches.patches):
-                        continue
-
-                    target_patch = target_patches.patches[patch_idx]
-                    target_coord = tuple(target_patches.coords[patch_idx])
-                    target_scale = 1.0
-
-                verification = self.verifier.verify(source_patch, target_patch)
-                if not verification.success:
-                    continue
-
-                probability = self.probability_model.compute(verification.rss, dof)
-                if probability < self.config.min_probability:
-                    continue
-
-                # Compute effective patch size (larger at lower pyramid levels)
-                effective_size = int(self.config.patch_size / target_scale)
-
-                all_matches.append(Match(
-                    source_coord=source_coord,
-                    target_coord=target_coord,
-                    patch_size=effective_size,
-                    probability=probability,
-                    image_id=image_id,
-                    color_M=verification.M,
-                    color_b=verification.b,
-                ))
 
         best_match = None
-        if all_matches:
-            best_match = max(all_matches, key=lambda m: m.probability)
-
-        # Find spatially coherent regions (dramatically reduces false positives)
-        coherent_regions = []
-        if self.config.coherence_enabled and all_matches:
-            coherent_regions = self.coherence_verifier.find_coherent_regions(all_matches)
+        if regions:
+            best_match = max(regions[0].matches, key=lambda m: m.probability)
+        elif matches:
+            best_match = max(matches, key=lambda m: m.probability)
 
         heatmap = None
         if return_heatmap and best_match is not None:
-            target_shape = self._target_shapes.get(best_match.image_id)
-            if target_shape is not None:
-                # Use coherent matches if available, otherwise all matches
-                if coherent_regions:
-                    # Use matches from the best coherent region
-                    target_matches = coherent_regions[0].matches
-                else:
-                    target_matches = [m for m in all_matches if m.image_id == best_match.image_id]
-                heatmap = self.aggregator.aggregate(target_matches, target_shape)
+            if regions:
+                heat_matches = regions[0].matches
+            else:
+                heat_matches = [m for m in matches if m.image_id == best_match.image_id]
+            heatmap = self.aggregator.aggregate(heat_matches, self._targets[best_match.image_id].shape)
+
+        significant = [m for r in regions if r.significant for m in r.matches]
+        localization = localize_region(significant, source_shape, largest_component=False)
 
         return MatchResult(
-            matches=all_matches,
+            matches=matches,
             best_match=best_match,
             heatmap=heatmap,
-            coherent_regions=coherent_regions,
-            stats={
-                "source_patches": len(source_patches.patches),
-                "total_matches": len(all_matches),
-                "coherent_regions": len(coherent_regions),
-            },
+            coherent_regions=regions,
+            stats=self._stats(len(src_patches), len(matches), regions),
+            localization=localization,
         )
+
+    @staticmethod
+    def _stats(n_source: int, n_matches: int, regions: List[CoherentRegion]) -> Dict[str, Any]:
+        return {
+            "source_patches": n_source,
+            "total_matches": n_matches,
+            "coherent_regions": len(regions),
+            "significant_regions": sum(1 for r in regions if r.significant),
+        }
+
+    def _verified_candidates(self, src_patches, src_coords, descriptors, target_ids):
+        """k-NN search plus the per-patch chi-square pre-filter, vectorized."""
+        hits = self.index.search(descriptors, self.config.k_neighbors)
+        valid = (hits.owner >= 0) & (hits.distances <= self.config.distance_threshold)
+        if target_ids is not None:
+            wanted = set(target_ids)
+            allowed = np.array([i in wanted for i in hits.image_ids] + [False])
+            valid &= allowed[hits.owner]  # owner == -1 lands on the trailing False
+        rows, cols = np.nonzero(valid)
+        owners = hits.owner[rows, cols]
+        tgt_all = hits.patch_idx[rows, cols]
+
+        src_out, tgt_out, matches = [], [], []
+        verified_per_target: Dict[str, int] = {}
+
+        for owner in np.unique(owners):
+            image_id = hits.image_ids[owner]
+            target = self._load_target(image_id)
+            if target is None:
+                continue
+            sel = owners == owner
+            src_idx, tgt_idx = rows[sel], tgt_all[sel]
+
+            for start in range(0, len(src_idx), _FIT_CHUNK):
+                s_chunk = src_idx[start:start + _FIT_CHUNK]
+                t_chunk = tgt_idx[start:start + _FIT_CHUNK]
+                src_chunk, tgt_chunk = src_patches[s_chunk], target.patches[t_chunk]
+                usable = _usable_pixels(src_chunk, tgt_chunk)
+                rss = fit_gain_offset_batch(
+                    luminance(src_chunk).reshape(len(s_chunk), -1),
+                    luminance(tgt_chunk).reshape(len(t_chunk), -1),
+                    usable,
+                )
+                prob = self.probability_model.compute(rss, usable.sum(axis=1) - 2)
+                ok = np.nonzero(prob >= self.config.min_probability)[0]
+                for j in ok:
+                    ti = t_chunk[j]
+                    matches.append(Match(
+                        source_coord=(int(src_coords[s_chunk[j], 0]), int(src_coords[s_chunk[j], 1])),
+                        target_coord=(int(target.coords[ti, 0]), int(target.coords[ti, 1])),
+                        patch_size=self.config.patch_size,
+                        probability=float(prob[j]),
+                        image_id=image_id,
+                        target_scale=float(target.scales[ti]),
+                    ))
+                src_out.append(s_chunk[ok])
+                tgt_out.append(t_chunk[ok])
+                verified_per_target[image_id] = verified_per_target.get(image_id, 0) + len(ok)
+
+        candidates = _Candidates(
+            src_idx=np.concatenate(src_out) if src_out else np.zeros(0, dtype=np.int64),
+            tgt_idx=np.concatenate(tgt_out) if tgt_out else np.zeros(0, dtype=np.int64),
+            matches=matches,
+        )
+        return candidates, verified_per_target
+
+    # ------------------------------------------------------------------
+    # Region-level verification
+    # ------------------------------------------------------------------
+
+    def _significant_regions(self, candidates, src_patches, src_coords, source_shape, verified_per_target):
+        """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA."""
+        clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
+        clusters.sort(key=lambda r: len(r.matches), reverse=True)
+        row_of = {id(m): i for i, m in enumerate(candidates.matches)}
+
+        cfg = self.config
+        n_source = len(src_patches)
+        overlap = overlap_factor(cfg.patch_size, cfg.stride)
+        window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
+        n_scales = len(cfg.pyramid_scales) if self.pyramid is not None else 1
+        searched = list(verified_per_target)
+        sh, sw = source_shape
+        n_offsets = sum(
+            (sw + self._targets[t].shape[1]) * (sh + self._targets[t].shape[0]) / window * n_scales
+            for t in searched
+        )
+        n_tests = max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+
+        regions = []
+        for cluster in clusters[:_MAX_REGIONS]:
+            rows = np.array([row_of[id(m)] for m in cluster.matches])
+            target = self._targets[cluster.image_id]
+            src = src_patches[candidates.src_idx[rows]]
+            tgt = target.patches[candidates.tgt_idx[rows]]
+
+            M, b = self._fit_region_transform(src, tgt)
+            residual = tgt.reshape(len(rows), -1, 3) - (src.reshape(len(rows), -1, 3) @ M.T + b)
+            # The transform is shared by the region, so each patch keeps one
+            # degree of freedom per usable pixel.
+            usable = _usable_pixels(src, tgt)
+            rss = (usable * (residual @ LUMA) ** 2).sum(axis=1)
+            prob = self.probability_model.compute(rss, usable.sum(axis=1))
+            consistent = prob >= cfg.min_probability
+            inliers = [m for m, ok in zip(cluster.matches, consistent) if ok]
+            if len(inliers) < cfg.coherence_min_cluster:
+                continue
+
+            region = make_region(cluster.offset, inliers, cluster.image_id)
+            region.color_M, region.color_b = M, b
+            for m in inliers:
+                m.color_M, m.color_b = M, b
+
+            # k: distinct source positions that agree; n: source positions tested in that area.
+            k = len({m.source_coord for m in inliers})
+            x0, y0, w, h = region.source_bbox
+            last_x, last_y = x0 + w - cfg.patch_size, y0 + h - cfg.patch_size
+            in_box = (
+                (src_coords[:, 0] >= x0) & (src_coords[:, 0] <= last_x)
+                & (src_coords[:, 1] >= y0) & (src_coords[:, 1] <= last_y)
+            )
+            n = max(int(in_box.sum()), k)
+            n_target = max(self.index.count(cluster.image_id), 1)
+            p = min(1.0, verified_per_target[cluster.image_id] / (n_source * n_target) * window)
+            region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
+            regions.append(region)
+
+        regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
+        return regions
+
+    def _fit_region_transform(self, src: np.ndarray, tgt: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Robust (Huber) affine color fit over every pixel pair of a region."""
+        src_px = src.reshape(-1, 3)
+        tgt_px = tgt.reshape(-1, 3)
+        usable = _usable_pixels(src, tgt).ravel()
+        if usable.sum() >= 4:
+            src_px, tgt_px = src_px[usable], tgt_px[usable]
+        if len(src_px) > _MAX_FIT_PIXELS:
+            pick = np.random.RandomState(0).choice(len(src_px), _MAX_FIT_PIXELS, replace=False)
+            src_px, tgt_px = src_px[pick], tgt_px[pick]
+        fit = self.verifier.verify(src_px[:, None, :], tgt_px[:, None, :])
+        return fit.M, fit.b
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: str) -> None:
+        """
+        Save the index bundle: ``{path}.index``, ``{path}.meta.json`` and
+        ``{path}.engine.json`` (config + target paths and shapes).
+
+        Patches aren't stored; ``load`` re-extracts them from each target's
+        ``image_path`` when it's first needed.
+        """
+        from spade.search.index import _atomic_write, _write_json
+
+        self.index.save(path)
+        state = {
+            "version": _BUNDLE_VERSION,
+            "config": self.config.to_dict(),
+            "targets": [[image_id, t.path, t.shape[0], t.shape[1]] for image_id, t in self._targets.items()],
+        }
+        _atomic_write(f"{path}.engine.json", lambda tmp: _write_json(tmp, state))
+
+    @classmethod
+    def load(cls, path: str, **config_overrides) -> "ForensicsEngine":
+        """
+        Load a bundle written by ``save``.
+
+        ``config_overrides`` may change matching settings (thresholds, k, ...);
+        settings that shape the index (patch size, stride, entropy, pyramid)
+        always come from the bundle so the stored descriptors stay valid.
+        """
+        try:
+            with open(f"{path}.engine.json") as f:
+                state = json.load(f)
+        except FileNotFoundError as e:
+            raise IndexStoreError(f"no engine bundle at {path}.engine.json") from e
+        if state.get("version") != _BUNDLE_VERSION:
+            raise IndexStoreError(f"unsupported bundle version {state.get('version')!r}")
+
+        frozen = {"patch_size", "stride", "entropy_threshold", "pyramid_enabled", "pyramid_scales", "pyramid_min_size"}
+        overrides = {k: v for k, v in config_overrides.items() if k not in frozen}
+        engine = cls(Config.from_dict(state["config"], **overrides))
+        index = ANNIndex.load(path)
+        if index.dim != engine.descriptor.dim:
+            raise IndexStoreError(f"index dim {index.dim} doesn't match descriptor dim {engine.descriptor.dim}")
+        engine.index = index
+        for image_id, image_path, h, w in state["targets"]:
+            engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path)
+        return engine
+
+    def _load_target(self, image_id: str) -> Optional[_Target]:
+        """The target with patches in memory, re-extracting them from disk if needed."""
+        target = self._targets.get(image_id)
+        if target is None or target.patches is not None:
+            return target
+        if not target.path or not os.path.exists(target.path):
+            logger.warning(f"Can't verify matches against '{image_id}': image file not available")
+            return None
+        image = self._normalize_image(load_image(target.path))
+        patches, coords, scales, _ = self._describe_target(image)
+        if len(patches) != self.index.count(image_id):
+            logger.warning(f"'{image_id}' changed on disk since it was indexed; skipping it")
+            return None
+        target.patches, target.coords, target.scales = patches, coords, scales
+        return target
+
+    # ------------------------------------------------------------------
 
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
         """Convert image to float32 in [0, 1] range."""
@@ -700,15 +697,12 @@ class ForensicsEngine:
             result = image
         else:
             max_val = image.max()
-            # Check for invalid values before division
-            if not np.isfinite(max_val) or max_val == 0:
-                if max_val == 0:
-                    raise InvalidImageError("Image is completely black (all zeros)")
-                else:
-                    raise InvalidImageError("Image contains NaN or infinite values")
+            if not np.isfinite(max_val):
+                raise InvalidImageError("Image contains NaN or infinite values")
+            if max_val == 0:
+                raise InvalidImageError("Image is completely black (all zeros)")
             result = image.astype(np.float32) / max_val
 
-        # Final check for invalid values
         if np.any(~np.isfinite(result)):
             raise InvalidImageError("Image contains NaN or infinite values")
 
@@ -718,40 +712,38 @@ class ForensicsEngine:
     @property
     def target_ids(self) -> List[str]:
         """List of indexed target image IDs."""
-        return list(self._target_shapes.keys())
+        return list(self._targets)
 
     @property
     def target_count(self) -> int:
         """Number of indexed targets."""
-        return len(self._target_shapes)
+        return len(self._targets)
 
     def get_target_shape(self, image_id: str) -> Optional[Tuple[int, int]]:
         """Get (height, width) of indexed target, or None if not found."""
-        return self._target_shapes.get(image_id)
+        target = self._targets.get(image_id)
+        return target.shape if target else None
 
     def get_target_path(self, image_id: str) -> Optional[str]:
         """Get file path of indexed target, or None if not found."""
-        return self._target_paths.get(image_id)
+        target = self._targets.get(image_id)
+        return target.path if target else None
 
     def has_target(self, image_id: str) -> bool:
         """Check if target is indexed."""
-        return image_id in self._target_shapes
+        return image_id in self._targets
 
-    def remove_target(self, image_id: str) -> bool:
-        """
-        Remove target metadata (patches, shapes, paths).
 
-        Note: Descriptors remain in FAISS index but won't match due to
-        metadata filtering. Returns True if removed, False if not found.
-        """
-        if image_id not in self._target_shapes:
-            return False
+def _usable_pixels(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """(N, P) bool: pixel pairs with no channel clipped at 0 or 1 on either side.
 
-        del self._target_shapes[image_id]
-        self._target_paths.pop(image_id, None)
-        self._target_patches.pop(image_id, None)
-        self._target_pyramid_patches.pop(image_id, None)
-        return True
+    A recolor that saturates breaks the affine model on exactly those pixels; a
+    clipped source channel corrupts every predicted target channel, so the
+    whole pixel pair goes. One 8-bit level of slack either way.
+    """
+    n = len(source)
+    both = np.concatenate([source.reshape(n, -1, 3), target.reshape(n, -1, 3)], axis=2)
+    return ((both > 1.0 / 255) & (both < 254.0 / 255)).all(axis=2)
 
 
 def load_image(path: str) -> np.ndarray:

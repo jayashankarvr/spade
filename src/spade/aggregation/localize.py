@@ -1,14 +1,8 @@
-"""Turn a set of matches into a clean localization mask.
+"""Turn a set of matches into a localization mask in source (query) coordinates.
 
-SPADE's dense 3x3 matching produces true matches concentrated on the (contiguous)
-spliced region plus scattered false matches on coincidentally-similar background.
-A spatial-density filter - keep the largest connected component of the matched
-footprints - removes the scattered false positives while preserving the region.
-
-Empirically this is the single biggest precision lever: on synthetic recolored
-splices it lifts precision ~0.40 -> ~0.73 and IoU ~0.38 -> ~0.69 with negligible
-recall loss (see BENCHMARKS.md). It operates in *source* (query) coordinates,
-where the splice lives.
+The engine passes only matches from significant regions, so the mask is simply
+their footprint. For a raw, unfiltered match list, keeping the largest connected
+component is a cheap way to drop scattered false matches.
 """
 
 from __future__ import annotations
@@ -76,18 +70,11 @@ def mask_to_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
 
 @dataclass
 class Localization:
-    """Predicted localization plus the image-level detection score.
-
-    ``area_fraction`` (fraction of the image covered by the largest matched
-    component) is SPADE's detection signal: empirically it separates spliced
-    from clean images far better than match counts (ROC-AUC ~0.86 vs ~0.50 for
-    a match-count score on synthetic recolored splices; see BENCHMARKS.md). The
-    spatial structure discriminates, not the number of matches.
-    """
+    """Predicted localization mask and how much of the image it covers."""
     mask: np.ndarray                       # bool (H, W) predicted splice mask
     bbox: Tuple[int, int, int, int]        # (x, y, w, h) of the mask
     area: int                              # mask pixel count
-    area_fraction: float                   # area / (H * W) - the detection score in [0, 1]
+    area_fraction: float                   # area / (H * W), in [0, 1]
 
 
 def localize_region(
@@ -95,7 +82,7 @@ def localize_region(
     shape: Tuple[int, int],
     largest_component: bool = True,
 ) -> Localization:
-    """Localize the splice and compute its detection score in one pass."""
+    """Localize the splice and measure its area in one pass."""
     mask = localize(matches, shape, largest_component=largest_component)
     area = int(mask.sum())
     h, w = shape

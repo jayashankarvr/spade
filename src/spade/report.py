@@ -3,8 +3,16 @@
 The report is the stable output contract for SPADE: a machine-readable,
 reproducible, audit-defensible record of a match. It captures *what* was
 compared (input file hashes + shapes), *how* (tool version + config), and the
-*result* (localization, the recovered affine color transform, and a calibrated
-chi-square probability).
+*result* (localization, the recovered affine color transform, and how
+significant each matched region is).
+
+Two numbers that are easy to confuse:
+
+* ``fit_p_value`` (per match): chi-square goodness-of-fit of one patch pair.
+  It says the pair is *consistent* with a copy, not that it *is* one.
+* ``log10_nfa`` (per region): log10 of the expected number of regions at least
+  this good in images with no copy at all. Negative means fewer than one
+  expected by chance; that's the number to base a conclusion on.
 
 Everything downstream - the benchmark harness, the CLI/API, third-party
 integrations - should consume this schema rather than SPADE's in-memory objects.
@@ -21,7 +29,10 @@ import numpy as np
 
 # Bump on any breaking change to the structure below.
 # 1.1: added top-level "cues" (image-level forensic signals) + result.localization.
-SCHEMA_VERSION = "1.1"
+# 2.0: match "probability" renamed "fit_p_value"; regions gain "log10_nfa" and
+#      "significant"; result gains "detected"; localization covers significant
+#      regions and its "detection_score" is -log10(NFA) of the best region.
+SCHEMA_VERSION = "2.0"
 
 # Config fields worth recording for reproducibility (kept deliberately small and
 # forensically relevant rather than dumping the whole Config).
@@ -29,12 +40,11 @@ _REPORTED_CONFIG_FIELDS = (
     "patch_size",
     "stride",
     "entropy_threshold",
-    "descriptor_dim",
     "k_neighbors",
     "distance_threshold",
     "min_probability",
     "noise_sigma",
-    "scoring_mode",
+    "max_nfa",
     "pyramid_enabled",
     "coherence_enabled",
 )
@@ -88,7 +98,7 @@ def _match_dict(match: Any) -> Optional[Dict[str, Any]]:
         "source_coord": [int(match.source_coord[0]), int(match.source_coord[1])],
         "target_coord": [int(match.target_coord[0]), int(match.target_coord[1])],
         "patch_size": int(match.patch_size),
-        "probability": float(match.probability),
+        "fit_p_value": float(match.probability),
         "image_id": match.image_id,
         "color_transform": _color_transform(
             getattr(match, "color_M", None), getattr(match, "color_b", None)
@@ -106,16 +116,19 @@ def _bbox_dict(bbox: Any) -> Dict[str, int]:
 
 
 def _region_color_transform(region: Any) -> Optional[Dict[str, Any]]:
-    """Aggregate (median) color transform across a coherent region's matches.
-
-    A genuine recolored splice shares one consistent transform, so the median
-    over the region is both robust and the forensically meaningful quantity.
-    """
+    """The region's color transform: its own fit if present, else the median of its matches'."""
+    if getattr(region, "color_M", None) is not None:
+        return _color_transform(region.color_M, region.color_b)
     Ms = [m.color_M for m in region.matches if getattr(m, "color_M", None) is not None]
     bs = [m.color_b for m in region.matches if getattr(m, "color_b", None) is not None]
     if not Ms or not bs:
         return None
     return _color_transform(np.median(np.stack(Ms), axis=0), np.median(np.stack(bs), axis=0))
+
+
+def _best_log10_nfa(result: Any) -> Optional[float]:
+    values = [r.log10_nfa for r in result.coherent_regions if r.log10_nfa is not None]
+    return min(values) if values else None
 
 
 def _config_dict(config: Any) -> Dict[str, Any]:
@@ -157,22 +170,24 @@ def build_report(
     if generated_at is None:
         generated_at = datetime.now(timezone.utc).isoformat()
 
-    # Localization + detection score from the spatial-density component (in
-    # source/query coordinates). Computed when the source image shape is known.
+    # Localization in source/query coordinates. The engine computes it from the
+    # significant regions; for a hand-built result fall back to the largest
+    # connected component of whatever matches there are.
     localization: Optional[Dict[str, Any]] = None
     if source_image is not None:
-        from spade.aggregation.localize import localize_region
+        loc = getattr(result, "localization", None)
+        if loc is None:
+            from spade.aggregation.localize import localize_region
 
-        # localize_region keeps the single largest connected component, matching
-        # the single-splice positioning. A genuine multi-splice image would need
-        # per-region localization here.
-        coherent = [m for r in result.coherent_regions for m in r.matches]
-        matches = coherent if coherent else result.matches
-        loc = localize_region(matches, (int(source_image.shape[0]), int(source_image.shape[1])))
+            coherent = [m for r in result.coherent_regions for m in r.matches]
+            shape = (int(source_image.shape[0]), int(source_image.shape[1]))
+            loc = localize_region(coherent or result.matches, shape)
+        best_nfa = _best_log10_nfa(result)
         localization = {
-            "bbox": {"x": loc.bbox[0], "y": loc.bbox[1], "width": loc.bbox[2], "height": loc.bbox[3]},
+            "bbox": _bbox_dict(loc.bbox),
             "area_px": loc.area,
-            "detection_score": round(loc.area_fraction, 6),
+            "area_fraction": round(loc.area_fraction, 6),
+            "detection_score": None if best_nfa is None else round(-best_nfa, 4),
         }
 
     # Image-level forensic cues, independent of the match. Computed on the source
@@ -207,6 +222,8 @@ def build_report(
                 "source_bbox": _bbox_dict(region.source_bbox),
                 "target_bbox": _bbox_dict(region.target_bbox),
                 "color_transform": _region_color_transform(region),
+                "log10_nfa": None if region.log10_nfa is None else round(float(region.log10_nfa), 4),
+                "significant": bool(region.significant),
             }
         )
 
@@ -221,6 +238,7 @@ def build_report(
         "config": _config_dict(config),
         "result": {
             "match_found": result.best_match is not None,
+            "detected": any(r.significant for r in result.coherent_regions),
             "num_matches": len(result.matches),
             "num_coherent_regions": len(result.coherent_regions),
             "localization": localization,
