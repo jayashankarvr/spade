@@ -3,9 +3,10 @@
 Usage:
     python -m spade.bench.download casia2
 
-Datasets come from Kaggle and need an API token: set KAGGLE_USERNAME and
-KAGGLE_KEY (kaggle.com -> Settings -> API -> Create New Token). They're
-research datasets under their own terms; nothing here redistributes them.
+Datasets come from Kaggle and need credentials: an API token in
+KAGGLE_API_TOKEN, or KAGGLE_USERNAME and KAGGLE_KEY, or ~/.kaggle/kaggle.json
+(kaggle.com -> Settings -> API). They're research datasets under their own
+terms; nothing here redistributes them.
 """
 
 from __future__ import annotations
@@ -24,12 +25,12 @@ DATASETS = {
 
 
 def _kaggle_api():
-    if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")) and not (
-        Path.home() / ".kaggle" / "kaggle.json"
-    ).exists():
+    has_token = bool(os.environ.get("KAGGLE_API_TOKEN"))
+    has_key = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
+    if not (has_token or has_key or (Path.home() / ".kaggle" / "kaggle.json").exists()):
         raise SystemExit(
-            "Kaggle credentials missing. Set KAGGLE_USERNAME and KAGGLE_KEY "
-            "(kaggle.com -> Settings -> API -> Create New Token)."
+            "Kaggle credentials missing. Set KAGGLE_API_TOKEN, or KAGGLE_USERNAME and KAGGLE_KEY "
+            "(kaggle.com -> Settings -> API)."
         )
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
@@ -38,6 +39,29 @@ def _kaggle_api():
     api = KaggleApi()
     api.authenticate()
     return api
+
+
+def _download_with_token(ref: str, target: Path, token: str) -> None:
+    """Fetch a dataset archive through www.kaggle.com with an API token.
+
+    The kaggle package checks new-style tokens against api.kaggle.com first,
+    which restricted networks often block; the download endpoint itself
+    accepts the token and redirects to a signed storage URL.
+    """
+    import zipfile
+
+    import requests
+
+    archive = target / "archive.zip"
+    url = f"https://www.kaggle.com/api/v1/datasets/download/{ref}"
+    with requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        with open(archive, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(target)
+    archive.unlink()
 
 
 def download(name: str) -> Path:
@@ -49,7 +73,11 @@ def download(name: str) -> Path:
         return target
     target.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {ref} into {target} ...")
-    _kaggle_api().dataset_download_files(ref, path=str(target), unzip=True, quiet=False)
+    token = os.environ.get("KAGGLE_API_TOKEN")
+    if token:
+        _download_with_token(ref, target, token)
+    else:
+        _kaggle_api().dataset_download_files(ref, path=str(target), unzip=True, quiet=False)
     count = sum(1 for _ in done.iterdir()) if done.exists() else 0
     if count < min_files:
         raise SystemExit(f"download looks incomplete: {count} files in {done}, expected >= {min_files}")
