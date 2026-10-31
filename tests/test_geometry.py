@@ -87,3 +87,58 @@ class TestRigidClustering:
     def test_rotation_mode_rejects_pyramid(self):
         with pytest.raises(ValueError, match="rotation_invariant"):
             Config(rotation_invariant=True, pyramid_enabled=True)
+
+
+def _mirrored_splice(seed=0):
+    from spade.bench.synthetic import _textured_image
+
+    rng = np.random.RandomState(seed)
+    donor = _textured_image(rng, 96, 96)
+    host = _textured_image(rng, 96, 96)
+    tampered = host.copy()
+    tampered[50:80, 10:40] = donor[20:50, 40:70][:, ::-1]
+    mask = np.zeros((96, 96), bool)
+    mask[50:80, 10:40] = True
+    return donor, tampered, mask
+
+
+class TestMirroredCopies:
+    def test_found_only_with_flip_invariance(self):
+        donor, tampered, mask = _mirrored_splice()
+        plain = ForensicsEngine()
+        plain.index_target(donor, "d")
+        assert not (plain.match(tampered).localization.mask & mask).any()
+
+        flip = ForensicsEngine(Config(flip_invariant=True))
+        flip.index_target(donor, "d")
+        result = flip.match(tampered)
+        assert result.significant_regions and result.significant_regions[0].mirrored
+        assert _iou(result.localization.mask, mask) > 0.6
+
+    def test_mirrored_search_counts_its_tests(self):
+        donor, tampered, _ = _mirrored_splice()
+        plain, flip = ForensicsEngine(), ForensicsEngine(Config(flip_invariant=True))
+        for engine in (plain, flip):
+            engine.index_target(donor, "d")
+        assert flip.match(tampered).stats["n_tests"] == pytest.approx(2 * plain.match(tampered).stats["n_tests"])
+
+
+class TestSeedIndex:
+    def test_seed_index_is_smaller_and_still_finds_the_copy(self):
+        from spade.bench.synthetic import make_recolored_splice
+
+        sample = make_recolored_splice(seed=0, image_size=96, fragment_size=24)
+        dense, seeds = ForensicsEngine(), ForensicsEngine(Config(seed_stride=4))
+        for engine in (dense, seeds):
+            engine.index_target(sample.donor, "d")
+        assert seeds.index.size * 10 < dense.index.size
+        result = seeds.match(sample.tampered)
+        assert result.significant_regions
+        assert _iou(result.localization.mask, sample.mask) > 0.7
+
+    def test_target_pixels_stored_once(self):
+        engine = ForensicsEngine()
+        image = (np.random.RandomState(0).rand(64, 64, 3) * 255).astype(np.uint8)
+        engine.index_target(image, "a")
+        target = engine._targets["a"]
+        assert target.levels[1.0].dtype == np.uint8 and np.array_equal(target.levels[1.0], image)

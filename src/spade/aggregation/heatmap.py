@@ -23,6 +23,8 @@ class Match:
     # Target patch orientation minus source patch orientation, radians
     # (rotation-invariant mode only).
     rotation: float = 0.0
+    # Found by searching the horizontally mirrored source (flip-invariant mode).
+    mirrored: bool = False
 
 
 class SpatialAggregator:

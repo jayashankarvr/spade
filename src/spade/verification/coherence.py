@@ -26,6 +26,8 @@ class CoherentRegion:
     max_log10_nfa: float = 0.0
     # Rotation-invariant mode: target = R(rotation) @ source + offset, about patch centres.
     rotation: float = 0.0
+    # The source side is a horizontal mirror image of the target side.
+    mirrored: bool = False
     # Region hypotheses tried in the search that produced this region; NFA is
     # n_tests times the region's own p-value (used for FDR across searches).
     n_tests: Optional[float] = None

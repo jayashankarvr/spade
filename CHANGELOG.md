@@ -63,6 +63,14 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - Benchmark: `--task copymove`, `--rotation`, `--flip`, `--curve` (tone curves) options; CASIA v2 `Tp_S` copy-moves.
 - Tried and dropped: isotonic tone-curve fitting (the affine fit already handles strong Curves/gamma edits as well or better).
 
+### Added (collections and review)
+- **Mirrored copies**: `Config(flip_invariant=True)` searches the mirrored query too (`Match.mirrored`, `CoherentRegion.mirrored`). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged.
+- **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
+- **Provenance graph**: `spade.provenance.build_provenance` and `spade provenance DIR [--copy-moves] [--json] [--dot]` - which images share regions, under FDR control across the collection. Links are undirected on purpose.
+- **Seed index**: `Config(seed_stride=N)` indexes every N-th target position and extends found regions densely against the stored pixels, with a chance rate measured at random control offsets.
+- Targets now store their pixels (uint8, per pyramid level) instead of a float32 patch per position: about 100x less memory per indexed image.
+- Copy-move's ratio test vectorized (about 3x faster `match_self`).
+
 ### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
 - **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.

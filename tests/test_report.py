@@ -169,3 +169,29 @@ class TestSignificanceFields:
         assert r["color_transform"]["is_identity"] is True
         assert report["result"]["localization"]["detection_score"] == 4.2
         assert "fit_p_value" in report["result"]["best_match"]
+
+
+class TestVisualReport:
+    def test_renders_regions_and_verdict(self):
+        from spade import ForensicsEngine
+        from spade.bench.synthetic import make_recolored_splice
+        from spade.visual import render_html
+
+        sample = make_recolored_splice(seed=0)
+        engine = ForensicsEngine()
+        engine.index_target(sample.donor, "donor")
+        result = engine.match(sample.tampered)
+        report = build_report(result=result, config=engine.config, source_image=sample.tampered,
+                              target_image=sample.donor, compute_cues=False)
+        page = render_html(report, sample.tampered, sample.donor, result.heatmap)
+        assert page.startswith("<!doctype html>")
+        assert "1 copied region found" in page
+        assert page.count("<rect ") == 2          # the region, outlined on both images
+        assert page.count("data:image/png;base64,") == 3
+
+    def test_no_detection_says_so(self):
+        from spade.visual import render_html
+
+        report = build_report(result=_result([]), config=Config(), compute_cues=False)
+        page = render_html(report, np.zeros((16, 16, 3), np.uint8))
+        assert "No region significant enough" in page and "<rect " not in page

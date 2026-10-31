@@ -75,6 +75,12 @@ spade search query.jpg myindex -k 5
 
 # Scan many questioned images, holding the false discovery rate at 5%
 spade scan myindex questioned/*.jpg --fdr 0.05
+
+# Visual report a person can review (plus the JSON record)
+spade match source.jpg target.jpg --html report.html -j report.json
+
+# Which images in a folder share copied regions (and, optionally, copy-moves)
+spade provenance photos/ --copy-moves --json links.json --dot links.dot
 ```
 
 ### Python API
@@ -155,12 +161,26 @@ engine.index_target(load_image(path), path, image_path=path)   # read from the f
 result = engine.match(image, jpeg_sigma=quantization_sigma("questioned.jpg") or 0.0)
 ```
 
+#### Mirrored Copies
+
+`Config(flip_invariant=True)` also searches the mirrored query, so a fragment
+that was flipped before pasting is found. On photo splices where half the
+fragments are mirrored it doubles recall (0.45 -> 0.90) with the false-alarm
+rate unchanged; it also doubles the search time.
+
 #### Rotated Copies (experimental)
 
 `Config(rotation_invariant=True)` describes every patch in its own orientation
 and groups matches by rotation + translation. It finds rotated copies and
 recovers the angle, but is much slower and on our photo benchmark catches
 about half of the copies rotated by arbitrary angles, so it's off by default.
+
+#### Large Collections
+
+`Config(seed_stride=4)` indexes only every 4th target position per axis (1/16
+of the index) and verifies found regions densely against the target's stored
+pixels. Targets keep their pixels once (uint8) instead of a patch per
+position, which is most of the memory either way.
 
 #### Multi-Scale Matching
 

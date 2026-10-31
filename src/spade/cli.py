@@ -108,6 +108,7 @@ THRESHOLD_HELP = "Per-patch fit p-value floor (0-1); default from config"
 @click.option("-e", "--entropy", type=float, default=None, help="Entropy threshold in bits (0 disables); default from config")
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
 @click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
+@click.option("--html", "html_output", type=click.Path(), help="Write a visual HTML report to this path")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 def match(
     source: str,
@@ -117,6 +118,7 @@ def match(
     entropy: Optional[float],
     output: Optional[str],
     json_output: Optional[str],
+    html_output: Optional[str],
     verbose: bool,
 ):
     """Match SOURCE image against TARGET image."""
@@ -155,7 +157,7 @@ def match(
         Image.fromarray(heatmap_colored).save(output)
         click.echo(f"\nHeatmap saved to: {output}")
 
-    if json_output:
+    if json_output or html_output:
         from spade.report import build_report, write_report
 
         report = build_report(
@@ -167,8 +169,15 @@ def match(
             target_image=target_img,
             heatmap_path=output if (output and result.heatmap is not None) else None,
         )
-        write_report(report, json_output)
-        click.echo(f"\nForensic report written to: {json_output}")
+        if json_output:
+            write_report(report, json_output)
+            click.echo(f"\nForensic report written to: {json_output}")
+        if html_output:
+            from spade.visual import render_html
+
+            with open(html_output, "w") as f:
+                f.write(render_html(report, source_img, target_img, result.heatmap))
+            click.echo(f"\nVisual report written to: {html_output}")
 
 
 @cli.command()
@@ -288,6 +297,49 @@ def scan(index_file: str, sources, fdr: float):
             f"  {owner[id(region)]}: ({x},{y}) {w}x{h} <- {region.image_id}, "
             f"{len(region.matches)} patches, log10 NFA {region.log10_nfa:.1f}"
         )
+
+
+@cli.command()
+@click.argument("directory", type=click.Path(exists=True, file_okay=False))
+@click.option("-p", "--pattern", default="*.jpg,*.png", help="File patterns to include")
+@click.option("--fdr", default=0.05, show_default=True, help="False discovery rate across all reported regions")
+@click.option("--copy-moves", is_flag=True, help="Also look for regions duplicated within each image")
+@click.option("--json", "json_output", type=click.Path(), help="Write the links as JSON")
+@click.option("--dot", "dot_output", type=click.Path(), help="Write a Graphviz graph of the links")
+def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_output, dot_output):
+    """Find which images in DIRECTORY share copied regions with which.
+
+    Links are undirected: the pixels don't say which image was the original.
+    """
+    import json
+
+    from spade.provenance import build_provenance, to_dict, to_dot
+
+    paths = sorted({p for pat in pattern.split(",") for p in Path(directory).glob(pat.strip())})
+    if len(paths) < 2 and not copy_moves:
+        raise click.ClickException("Need at least two images (or --copy-moves).")
+    engine = ForensicsEngine(build_config(None, None, None))
+    images = {}
+    with click.progressbar(paths, label="Indexing") as progress:
+        for path in progress:
+            image = safe_load_image(str(path))
+            sigma = quantization_sigma(str(path)) or 0.0
+            engine.index_target(image, path.name, jpeg_sigma=sigma)
+            images[path.name] = (image, sigma)
+    click.echo("Searching every image against the others...")
+    links = build_provenance(engine, images, fdr=fdr, copy_moves=copy_moves)
+
+    click.echo(f"\n{len(links)} link(s) at FDR {fdr} among {len(paths)} image(s):")
+    for link in links:
+        what = "duplicated within" if link.a == link.b else "shared by"
+        pair = link.a if link.a == link.b else f"{link.a} <-> {link.b}"
+        click.echo(f"  {len(link.regions)} region(s) {what} {pair}, best log10 NFA {link.log10_nfa:.1f}")
+    if json_output:
+        with open(json_output, "w") as f:
+            json.dump(to_dict(links), f, indent=2)
+    if dot_output:
+        with open(dot_output, "w") as f:
+            f.write(to_dot(links))
 
 
 @cli.command()
