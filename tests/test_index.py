@@ -82,3 +82,13 @@ class TestANNIndex:
     def test_empty_search(self):
         hits = ANNIndex(9).search(_vectors(3), k=5)
         assert hits.distances.shape == (3, 0)
+
+    def test_empty_target_never_owns_hits(self):
+        # An empty range starts at the same id as the next image's range.
+        index = ANNIndex(9)
+        index.add("empty", np.zeros((0, 9), np.float32))
+        index.add("full", _vectors(5, seed=4))
+        hits = index.search(_vectors(5, seed=4), k=3)
+        owners = {hits.image_ids[o] for o in hits.owner.ravel() if o >= 0}
+        assert owners == {"full"}
+        assert hits.patch_idx[2, 0] == 2

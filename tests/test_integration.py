@@ -99,6 +99,40 @@ class TestDetection:
         assert 0.0 <= result.heatmap.min() and result.heatmap.max() <= 1.0
 
 
+class TestSignificance:
+    def test_max_nfa_is_honoured(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        best = engine.match(splice.tampered).coherent_regions[0].log10_nfa
+        assert best < 0
+
+        # A threshold just below the best region's NFA must turn it off everywhere.
+        strict = ForensicsEngine(Config(max_nfa=10 ** (best - 1)))
+        strict.index_target(splice.donor, "donor")
+        result = strict.match(splice.tampered)
+        assert result.coherent_regions and not result.significant_regions
+        assert not result.localization.mask.any()
+
+    def test_targets_without_hits_still_count_as_tests(self, splice):
+        # Every target searched is a set of hypotheses tried, hit or not.
+        lone = ForensicsEngine()
+        lone.index_target(splice.donor, "donor")
+        crowded = ForensicsEngine()
+        crowded.index_target(splice.donor, "donor")
+        for i in range(9):
+            # same size as the donor, but flat: no patches, so never a hit
+            crowded.index_target(np.full((96, 96, 3), 60 + 10 * i, np.uint8), f"flat{i}")
+        a = lone.match(splice.tampered).coherent_regions[0].log10_nfa
+        b = crowded.match(splice.tampered).coherent_regions[0].log10_nfa
+        assert b == pytest.approx(a + 1.0, abs=0.05)  # 10x the targets -> +1 in log10
+
+    def test_flat_source_returns_empty_localization(self, splice):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        result = engine.match(np.full((40, 40, 3), 90, np.uint8))
+        assert result.localization is not None and not result.localization.mask.any()
+
+
 class TestIndexLifecycle:
     def test_indexing_order_does_not_matter(self, splice):
         # Regression: PCA used to be trained part-way through indexing, leaving
@@ -135,6 +169,27 @@ class TestIndexLifecycle:
             engine.index_target(make_negative_pair(seed=i, image_size=48).donor, f"t{i}")
         assert engine.target_ids == ["t1", "t2"]
         assert engine.index.image_ids == ["t1", "t2"]
+
+    def test_failed_index_does_not_evict(self, monkeypatch):
+        engine = ForensicsEngine(Config(max_targets=2))
+        for i in range(2):
+            engine.index_target(make_negative_pair(seed=i, image_size=48).donor, f"t{i}")
+
+        def boom(image):
+            raise MemoryError("simulated")
+
+        monkeypatch.setattr(engine, "_describe_target", boom)
+        with pytest.raises(MemoryError):
+            engine.index_target(make_negative_pair(seed=5, image_size=48).donor, "t2")
+        assert engine.target_ids == ["t0", "t1"]
+
+    def test_empty_target_does_not_steal_matches(self, splice):
+        engine = ForensicsEngine()
+        assert engine.index_target(np.full((64, 64, 3), 100, np.uint8), "flat") == 0
+        engine.index_target(splice.donor, "donor")
+        result = engine.match(splice.tampered)
+        assert result.significant_regions
+        assert {m.image_id for m in result.matches} == {"donor"}
 
     def test_duplicate_id_rejected(self, splice):
         engine = ForensicsEngine()

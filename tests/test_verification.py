@@ -128,12 +128,6 @@ class TestProbabilityModel:
                 p = model.compute(rss, dof)
                 assert 0.0 <= p <= 1.0
 
-    def test_dof_formula(self):
-        assert ProbabilityModel.compute_dof(3) == 15   # 27 - 12
-        assert ProbabilityModel.compute_dof(4) == 36   # 48 - 12
-        assert ProbabilityModel.compute_dof(5) == 63   # 75 - 12
-        assert ProbabilityModel.compute_dof(6) == 96   # 108 - 12
-
     def test_invalid_inputs_return_zero(self):
         model = ProbabilityModel()
 

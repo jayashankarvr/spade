@@ -33,18 +33,21 @@ def cli():
     pass
 
 
-def validate_params(threshold: Optional[float], patch_size: Optional[int], entropy: float) -> None:
+def validate_params(threshold: Optional[float], patch_size: Optional[int], entropy: Optional[float]) -> None:
     """Validate common CLI parameters (None means "use the Config default")."""
     if threshold is not None and not 0 <= threshold <= 1:
         raise click.BadParameter(f"threshold must be between 0 and 1, got {threshold}")
     if patch_size is not None and not (3 <= patch_size <= 16):
         raise click.BadParameter(f"patch-size must be between 3 and 16, got {patch_size}")
-    if entropy < 0:
+    if entropy is not None and entropy < 0:
         raise click.BadParameter(f"entropy must be >= 0, got {entropy}")
 
 
-def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: float) -> Config:
-    overrides = {"entropy_threshold": entropy if entropy > 0 else None}
+def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: Optional[float]) -> Config:
+    """Config from CLI flags; anything left as None keeps its Config/SPADE_* default."""
+    overrides = {}
+    if entropy is not None:
+        overrides["entropy_threshold"] = entropy if entropy > 0 else None
     if threshold is not None:
         overrides["min_probability"] = threshold
     if patch_size is not None:
@@ -101,7 +104,7 @@ THRESHOLD_HELP = "Per-patch fit p-value floor (0-1); default from config"
 @click.argument("target", type=click.Path(exists=True))
 @click.option("-t", "--threshold", type=float, default=None, help=THRESHOLD_HELP)
 @click.option("-p", "--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
-@click.option("-e", "--entropy", default=0.0, help="Entropy threshold in bits (0 to disable)")
+@click.option("-e", "--entropy", type=float, default=None, help="Entropy threshold in bits (0 disables); default from config")
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
 @click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
@@ -110,7 +113,7 @@ def match(
     target: str,
     threshold: Optional[float],
     patch_size: Optional[int],
-    entropy: float,
+    entropy: Optional[float],
     output: Optional[str],
     json_output: Optional[str],
     verbose: bool,
@@ -192,7 +195,7 @@ def index(directory: str, output: str, pattern: str, patch_size: Optional[int]):
 
     click.echo(f"Found {len(image_files)} images")
 
-    engine = ForensicsEngine(build_config(None, patch_size, 0.0))
+    engine = ForensicsEngine(build_config(None, patch_size, None))
     total_patches = 0
 
     with click.progressbar(image_files, label="Indexing") as progress:
@@ -224,7 +227,7 @@ def search(
     verbose: bool,
 ):
     """Search SOURCE image against a saved INDEX_FILE (the prefix given to `spade index -o`)."""
-    validate_params(threshold, None, 0.0)
+    validate_params(threshold, None, None)
 
     if verbose:
         click.echo(f"Loading index: {index_file}")

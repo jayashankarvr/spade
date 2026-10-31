@@ -5,6 +5,8 @@ from typing import Optional
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
+from spade.descriptors.core import luminance
+
 
 ENTROPY_BINS = 8
 
@@ -135,9 +137,7 @@ class PatchExtractor:
         n = len(patches)
         if n == 0:
             return np.array([], dtype=np.float32)
-        gray = (
-            0.299 * patches[..., 0] + 0.587 * patches[..., 1] + 0.114 * patches[..., 2]
-        ).reshape(n, -1)
+        gray = luminance(patches).reshape(n, -1)
         bins = np.clip((gray * ENTROPY_BINS).astype(np.int64), 0, ENTROPY_BINS - 1)
         # One bincount over (row, bin) pairs gives every histogram at once.
         flat = bins + (np.arange(n, dtype=np.int64) * ENTROPY_BINS)[:, None]

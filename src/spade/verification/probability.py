@@ -36,13 +36,3 @@ class ProbabilityModel:
         p = stats.chi2.sf(rss_arr / self.noise_sigma ** 2, np.maximum(dof_arr, 1))
         p = np.where((rss_arr < 0) | (dof_arr <= 0) | ~np.isfinite(rss_arr), 0.0, p)
         return float(p) if p.ndim == 0 else p
-
-    @staticmethod
-    def compute_dof(patch_size: int) -> int:
-        """
-        Degrees of freedom when the 12 affine parameters are fitted per patch.
-
-        Examples:
-            3x3 -> 15, 4x4 -> 36, 5x5 -> 63, 6x6 -> 96
-        """
-        return max(1, patch_size ** 2 * 3 - 12)

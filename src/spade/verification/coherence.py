@@ -16,18 +16,19 @@ class CoherentRegion:
     target_bbox: Tuple[int, int, int, int]  # (x, y, w, h) in target
     confidence: float                # mean probability * log2(size + 1), a ranking heuristic
     image_id: str = ""
-    # Filled in by region-level verification (ForensicsEngine.match). One color
-    # transform fitted over every pixel in the region, how many of the region's
-    # patches agree with it, and the a-contrario significance of that agreement.
+    # Filled in by region-level verification (ForensicsEngine.match): one color
+    # transform fitted over every pixel in the region, the a-contrario
+    # significance of the patches that agree with it, and the threshold that
+    # significance is judged against (log10 of Config.max_nfa).
     color_M: Optional[np.ndarray] = None
     color_b: Optional[np.ndarray] = None
-    consistent_matches: Optional[int] = None
     log10_nfa: Optional[float] = None
+    max_log10_nfa: float = 0.0
 
     @property
     def significant(self) -> bool:
-        """True when the region would be expected less than once by chance (NFA < 1)."""
-        return self.log10_nfa is not None and self.log10_nfa < 0.0
+        """True when the region's NFA is below the threshold (NFA < 1 by default)."""
+        return self.log10_nfa is not None and self.log10_nfa < self.max_log10_nfa
 
 
 def match_offset(match) -> Tuple[int, int]:

@@ -367,9 +367,9 @@ class ForensicsEngine:
         if image_id in self._targets:
             raise TargetExistsError(f"Target '{image_id}' is already indexed")
         image = self._normalize_image(image)
-        self._evict_lru_if_needed()
-
         patches, coords, scales, descriptors = self._describe_target(image)
+        # Evict only once the new target is ready, so a failure above costs nothing.
+        self._evict_lru_if_needed()
         self.index.add(image_id, descriptors)
         self._targets[image_id] = _Target(
             shape=(int(image.shape[0]), int(image.shape[1])),
@@ -437,7 +437,10 @@ class ForensicsEngine:
         src_patches, src_coords, descriptors = collection.patches[keep], collection.coords[keep], descriptors[keep]
 
         if len(src_patches) == 0 or self.index.size == 0:
-            return MatchResult([], None, None, [], self._stats(len(src_patches), 0, []))
+            return MatchResult(
+                [], None, None, [], self._stats(len(src_patches), 0, []),
+                localization=localize_region([], source_shape),
+            )
 
         candidates, verified_per_target = self._verified_candidates(
             src_patches, src_coords, descriptors, target_ids
@@ -446,8 +449,9 @@ class ForensicsEngine:
 
         regions: List[CoherentRegion] = []
         if self.config.coherence_enabled and matches:
+            searched = [t for t in self._targets if target_ids is None or t in set(target_ids)]
             regions = self._significant_regions(
-                candidates, src_patches, src_coords, source_shape, verified_per_target
+                candidates, src_patches, src_coords, source_shape, verified_per_target, searched
             )
 
         best_match = None
@@ -545,8 +549,12 @@ class ForensicsEngine:
     # Region-level verification
     # ------------------------------------------------------------------
 
-    def _significant_regions(self, candidates, src_patches, src_coords, source_shape, verified_per_target):
-        """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA."""
+    def _significant_regions(self, candidates, src_patches, src_coords, source_shape, verified_per_target, searched):
+        """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA.
+
+        ``searched`` is every target the query was compared against; each one
+        multiplies the number of region hypotheses tried, hits or not.
+        """
         clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
         clusters.sort(key=lambda r: len(r.matches), reverse=True)
         row_of = {id(m): i for i, m in enumerate(candidates.matches)}
@@ -556,13 +564,13 @@ class ForensicsEngine:
         overlap = overlap_factor(cfg.patch_size, cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         n_scales = len(cfg.pyramid_scales) if self.pyramid is not None else 1
-        searched = list(verified_per_target)
         sh, sw = source_shape
         n_offsets = sum(
             (sw + self._targets[t].shape[1]) * (sh + self._targets[t].shape[0]) / window * n_scales
             for t in searched
         )
         n_tests = max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+        max_log10_nfa = float(np.log10(cfg.max_nfa))
 
         regions = []
         for cluster in clusters[:_MAX_REGIONS]:
@@ -571,11 +579,11 @@ class ForensicsEngine:
             src = src_patches[candidates.src_idx[rows]]
             tgt = target.patches[candidates.tgt_idx[rows]]
 
-            M, b = self._fit_region_transform(src, tgt)
+            usable = _usable_pixels(src, tgt)
+            M, b = self._fit_region_transform(src, tgt, usable)
             residual = tgt.reshape(len(rows), -1, 3) - (src.reshape(len(rows), -1, 3) @ M.T + b)
             # The transform is shared by the region, so each patch keeps one
             # degree of freedom per usable pixel.
-            usable = _usable_pixels(src, tgt)
             rss = (usable * (residual @ LUMA) ** 2).sum(axis=1)
             prob = self.probability_model.compute(rss, usable.sum(axis=1))
             consistent = prob >= cfg.min_probability
@@ -600,16 +608,19 @@ class ForensicsEngine:
             n_target = max(self.index.count(cluster.image_id), 1)
             p = min(1.0, verified_per_target[cluster.image_id] / (n_source * n_target) * window)
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
+            region.max_log10_nfa = max_log10_nfa
             regions.append(region)
 
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
         return regions
 
-    def _fit_region_transform(self, src: np.ndarray, tgt: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Robust (Huber) affine color fit over every pixel pair of a region."""
+    def _fit_region_transform(
+        self, src: np.ndarray, tgt: np.ndarray, usable: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Robust (Huber) affine color fit over the usable pixel pairs of a region."""
         src_px = src.reshape(-1, 3)
         tgt_px = tgt.reshape(-1, 3)
-        usable = _usable_pixels(src, tgt).ravel()
+        usable = usable.ravel()
         if usable.sum() >= 4:
             src_px, tgt_px = src_px[usable], tgt_px[usable]
         if len(src_px) > _MAX_FIT_PIXELS:

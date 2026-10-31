@@ -106,13 +106,20 @@ class ANNIndex:
 
     def _resolve(self, ids: np.ndarray, image_ids: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         """Map vector ids to (owner index, patch index); -1 where there's no hit."""
-        starts = np.array([self._ranges[i][0] for i in image_ids], dtype=np.int64)
-        order = np.argsort(starts)
-        sorted_starts = starts[order]
-        pos = np.searchsorted(sorted_starts, ids, side="right") - 1
+        # Ranges are handed out in insertion order, so starts are already sorted.
+        # Empty ranges share their start with the next image and are left out,
+        # otherwise they could be credited with that image's hits.
+        owners = [i for i, image_id in enumerate(image_ids) if self._ranges[image_id][1] > 0]
+        if not owners:
+            missing = np.full(ids.shape, -1, dtype=np.int64)
+            return missing, missing.copy()
+        owners = np.array(owners, dtype=np.int64)
+        starts = np.array([self._ranges[image_ids[i]][0] for i in owners], dtype=np.int64)
+        pos = np.searchsorted(starts, ids, side="right") - 1
         valid = (ids >= 0) & (pos >= 0)
-        owner = np.where(valid, order[np.clip(pos, 0, None)], -1)
-        patch_idx = np.where(valid, ids - starts[np.clip(owner, 0, None)], -1)
+        pos = np.clip(pos, 0, None)
+        owner = np.where(valid, owners[pos], -1)
+        patch_idx = np.where(valid, ids - starts[pos], -1)
         return owner, patch_idx
 
     # ------------------------------------------------------------------

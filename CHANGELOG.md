@@ -39,6 +39,7 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - Heatmaps paint each match's footprint instead of a single pixel.
 - Entropy is computed with one `bincount` instead of a per-patch loop.
 - CLI: `spade index -o PREFIX` writes a bundle; `spade search` loads it and reloads patches from the indexed files. `match`/`search` print significant regions with their NFA.
+- CLI `-e/--entropy` now defaults to the config (so `SPADE_ENTROPY_THRESHOLD` applies); pass `-e 0` to turn the filter off explicitly.
 
 ### Removed
 - **Bayes-factor pipeline** (`scoring_mode="bayes"`: `engine_bayes`, Bayes-factor scorer, natural-image priors, 4-D Hough, persistence peaks, loopy BP, RG-trajectory term, Zernike and persistence descriptors, `scripts/train_priors.py`, `scripts/benchmark.py`, `scripts/synthetic_corpus.py`). The "calibrated" Bayes factor compared densities from different spaces with no Occam penalty, its BP graph construction was quadratic in Python, and the NFA replaces it.

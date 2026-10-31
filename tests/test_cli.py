@@ -33,3 +33,9 @@ class TestValidateParams:
     def test_build_config_rejects_unreachable_entropy(self):
         with pytest.raises(click.BadParameter, match="nothing would pass"):
             build_config(None, 3, 3.0)
+
+    def test_entropy_env_not_overridden_when_flag_absent(self, monkeypatch):
+        monkeypatch.setenv("SPADE_ENTROPY_THRESHOLD", "1.5")
+        assert build_config(None, None, None).entropy_threshold == 1.5
+        # an explicit -e 0 still disables it
+        assert build_config(None, None, 0.0).entropy_threshold is None
