@@ -105,7 +105,7 @@ def _mirrored_splice(seed=0):
 class TestMirroredCopies:
     def test_found_only_with_flip_invariance(self):
         donor, tampered, mask = _mirrored_splice()
-        plain = ForensicsEngine()
+        plain = ForensicsEngine(Config(flip_invariant=False))
         plain.index_target(donor, "d")
         assert not (plain.match(tampered).localization.mask & mask).any()
 
@@ -117,7 +117,7 @@ class TestMirroredCopies:
 
     def test_mirrored_search_counts_its_tests(self):
         donor, tampered, _ = _mirrored_splice()
-        plain, flip = ForensicsEngine(), ForensicsEngine(Config(flip_invariant=True))
+        plain, flip = ForensicsEngine(Config(flip_invariant=False)), ForensicsEngine(Config(flip_invariant=True))
         for engine in (plain, flip):
             engine.index_target(donor, "d")
         assert flip.match(tampered).stats["n_tests"] == pytest.approx(2 * plain.match(tampered).stats["n_tests"])

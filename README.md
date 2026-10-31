@@ -163,10 +163,11 @@ result = engine.match(image, jpeg_sigma=quantization_sigma("questioned.jpg") or 
 
 #### Mirrored Copies
 
-`Config(flip_invariant=True)` also searches the mirrored query, so a fragment
-that was flipped before pasting is found. On photo splices where half the
-fragments are mirrored it doubles recall (0.45 -> 0.90) with the false-alarm
-rate unchanged; it also doubles the search time.
+On by default: the mirrored query is searched too, so a fragment that was
+flipped before pasting is found (`Match.mirrored`, `CoherentRegion.mirrored`).
+On photo splices where half the fragments are mirrored it doubles recall
+(0.45 -> 0.90); on copy-move in real photos it adds no false alarms. It doubles
+search time; `Config(flip_invariant=False)` turns it off.
 
 #### Rotated Copies (experimental)
 

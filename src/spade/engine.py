@@ -232,7 +232,7 @@ class Config:
     rotation_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_ROTATION_INVARIANT", False))
     # Also search the mirrored source, so horizontally flipped copies are found
     # (vertical flips too, together with rotation_invariant).
-    flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", False))
+    flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", True))
     # Multi-scale pyramid (targets only)
     pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", False))
     pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])

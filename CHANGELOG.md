@@ -64,7 +64,7 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - Tried and dropped: isotonic tone-curve fitting (the affine fit already handles strong Curves/gamma edits as well or better).
 
 ### Added (collections and review)
-- **Mirrored copies**: `Config(flip_invariant=True)` searches the mirrored query too (`Match.mirrored`, `CoherentRegion.mirrored`). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged.
+- **Mirrored copies, on by default**: the mirrored query is searched too (`Match.mirrored`, `CoherentRegion.mirrored`; `Config(flip_invariant=False)` to disable). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged; copy-move on real photos: no extra false alarms. Doubles search time.
 - **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
 - **Provenance graph**: `spade.provenance.build_provenance` and `spade provenance DIR [--copy-moves] [--json] [--dot]` - which images share regions, under FDR control across the collection. Links are undirected on purpose.
 - **Seed index (experimental, not calibrated)**: `Config(seed_stride=N)` indexes every N-th target position and extends found regions densely against the stored pixels, with a chance rate measured at random control offsets. On real photos at JPEG 90 that chance rate is far too low (11 false regions per pair at NFA < 1e-3); off by default and documented as unsafe.
