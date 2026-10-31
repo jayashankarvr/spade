@@ -843,10 +843,17 @@ class ForensicsEngine:
         """Verify a region found from seeds densely, straight against the target's pixels.
 
         Every source patch in the seed region's box (grown by one seed
-        spacing) is tested at exactly the region's offset with the region's
-        color transform. The same test at a few random far-away offsets gives
-        the chance a patch passes when nothing was copied - an empirical null
-        for this content and this transform.
+        spacing) is tested at exactly the region's offset, with the same two
+        gates a dense search applies: its luminance pattern must match the
+        target patch's (descriptor distance), and its pixels must fit the
+        region's color transform. The pattern gate matters: low-contrast
+        patches fit almost any color residual test, so without it sky matched
+        sky across whole images.
+
+        The chance rate comes from running the identical procedure - transform
+        refitted, both gates - at a few random far-away offsets. Not refitting
+        there would compare a fitted hypothesis against unfitted controls and
+        understate chance.
 
         Returns (region over the agreeing patches, agreeing count k, tested
         count n, chance rate p).
@@ -862,21 +869,29 @@ class ForensicsEngine:
             & (src_coords[:, 1] >= y0 - grow) & (src_coords[:, 1] <= y0 + h - size + grow)
         )[0]
 
-        def test(offset):
+        src_desc, _ = self.descriptor.compute_batch(src_patches[box])
+        desc_of = dict(zip(box.tolist(), range(len(box))))
+
+        def test(offset, transform=None):
             tx, ty = src_coords[box, 0] + offset[0], src_coords[box, 1] + offset[1]
             inside = (tx >= 0) & (ty >= 0) & (tx <= lw - size) & (ty <= lh - size)
             idx = box[inside]
             if len(idx) == 0:
                 return idx, np.zeros(0)
             src = src_patches[idx]
-            tgt = windows[ty[inside], tx[inside], 0]
+            tgt = np.ascontiguousarray(windows[ty[inside], tx[inside], 0])
+            tgt_desc, tgt_textured = self.descriptor.compute_batch(tgt)
+            sd = src_desc[[desc_of[i] for i in idx]]
+            similar = tgt_textured & (((sd - tgt_desc) ** 2).sum(axis=1) <= cfg.distance_threshold)
             usable = _usable_pixels(src, tgt)
-            residual = tgt.reshape(len(idx), -1, 3) - (src.reshape(len(idx), -1, 3) @ M.T + b)
+            M_, b_ = transform if transform is not None else self._fit_region_transform(src, tgt, usable)
+            residual = tgt.reshape(len(idx), -1, 3) - (src.reshape(len(idx), -1, 3) @ M_.T + b_)
             rss = (usable * (residual @ LUMA) ** 2).sum(axis=1)
-            return idx, noise.compute(rss, usable.sum(axis=1))
+            prob = noise.compute(rss, usable.sum(axis=1))
+            return idx, np.where(similar, prob, 0.0)
 
         offset = np.array(seed_region.offset)
-        tested, prob = test(offset)
+        tested, prob = test(offset, (M, b))
         ok = prob >= cfg.min_probability
 
         rng = np.random.RandomState(0)
