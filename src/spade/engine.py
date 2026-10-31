@@ -31,7 +31,7 @@ import numpy as np
 from PIL import Image
 
 from spade.aggregation.heatmap import Match, SpatialAggregator
-from spade.aggregation.localize import Localization, localize_region
+from spade.aggregation.localize import Localization, localize_region, mask_to_bbox
 from spade.descriptors.core import LUMA, LuminanceDescriptor, luminance
 from spade.exceptions import (
     ConfigurationError,
@@ -41,13 +41,16 @@ from spade.exceptions import (
     TargetExistsError,
 )
 from spade.extraction.patches import PatchExtractor, max_entropy
+from spade.extraction.orientation import canonical_patches, patch_orientations
 from spade.extraction.pyramid import ImagePyramid
+from spade.jpeg import quantization_sigma
 from spade.logging_config import get_logger
 from spade.search.index import ANNIndex
 from spade.verification.affine import AffineVerifier, fit_gain_offset_batch
 from spade.verification.coherence import (
     CoherentRegion,
     SpatialCoherenceVerifier,
+    find_rigid_regions,
     make_region,
 )
 from spade.verification.nfa import log10_nfa, overlap_factor
@@ -62,6 +65,8 @@ _MAX_REGIONS = 100
 _MAX_FIT_PIXELS = 20000
 _FIT_CHUNK = 20000
 _BUNDLE_VERSION = 1
+# Rotation-invariant mode: matches within this angle of a region's rotation agree.
+_ANGLE_TOLERANCE = float(np.radians(15))
 
 
 def _env_int(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
@@ -217,6 +222,9 @@ class Config:
     coherence_min_cluster: int = field(default_factory=lambda: _env_int("SPADE_COHERENCE_MIN_CLUSTER", 3, min_val=2))
     # A region is reported as significant when its NFA is below this.
     max_nfa: float = field(default_factory=lambda: _env_float("SPADE_MAX_NFA", 1.0, min_val=0.0))
+    # Match copies at any rotation: patches are described in their own
+    # orientation and regions are rigid transforms instead of translations.
+    rotation_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_ROTATION_INVARIANT", False))
     # Multi-scale pyramid (targets only)
     pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", False))
     pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])
@@ -255,6 +263,8 @@ class Config:
                 raise ConfigurationError(f"All pyramid_scales must be > 0, got {self.pyramid_scales}")
             if 1.0 not in self.pyramid_scales:
                 raise ConfigurationError(f"pyramid_scales must include 1.0 (original scale), got {self.pyramid_scales}")
+        if self.rotation_invariant and self.pyramid_enabled:
+            raise ConfigurationError("rotation_invariant and pyramid_enabled can't be combined yet")
         if self.max_targets is not None and self.max_targets < 1:
             raise ConfigurationError(f"max_targets must be >= 1 or None, got {self.max_targets}")
 
@@ -293,6 +303,8 @@ class _Target:
     patches: Optional[np.ndarray] = None   # (N, s, s, 3) float32, aligned with the index
     coords: Optional[np.ndarray] = None    # (N, 2) full-resolution (x, y)
     scales: Optional[np.ndarray] = None    # (N,) pyramid scale of each patch
+    jpeg_sigma: float = 0.0                # rounding-error std of the file it came from
+    thetas: Optional[np.ndarray] = None    # (N,) patch orientations (rotation-invariant mode)
 
 
 @dataclass
@@ -325,7 +337,6 @@ class ForensicsEngine:
         self.descriptor = LuminanceDescriptor(self.config.patch_size)
         self.index = ANNIndex(dim=self.descriptor.dim)
         self.verifier = AffineVerifier(noise_sigma=self.config.noise_sigma)
-        self.probability_model = ProbabilityModel(noise_sigma=self.config.noise_sigma)
         self.aggregator = SpatialAggregator(smoothing_sigma=self.config.smoothing_sigma)
         self.coherence_verifier = SpatialCoherenceVerifier(
             offset_tolerance=self.config.coherence_offset_tolerance,
@@ -338,6 +349,9 @@ class ForensicsEngine:
                 min_size=self.config.pyramid_min_size,
             )
         self._targets: "OrderedDict[str, _Target]" = OrderedDict()
+        # Set only on the private engine match_self builds: search the image
+        # against itself, ignoring offsets shorter than this.
+        self._self_min_offset: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Indexing
@@ -348,6 +362,7 @@ class ForensicsEngine:
         image: np.ndarray,
         image_id: str,
         image_path: Optional[str] = None,
+        jpeg_sigma: Optional[float] = None,
     ) -> int:
         """
         Index a target image for later matching.
@@ -357,6 +372,8 @@ class ForensicsEngine:
             image_id: Unique identifier for this image
             image_path: Optional file path; lets a saved index reload the
                 image's patches later instead of keeping them in the bundle
+            jpeg_sigma: the image's JPEG rounding error (``spade.jpeg``); read
+                from ``image_path`` when not given
 
         Returns:
             Number of patches indexed (flat patches are skipped)
@@ -367,30 +384,47 @@ class ForensicsEngine:
         if image_id in self._targets:
             raise TargetExistsError(f"Target '{image_id}' is already indexed")
         image = self._normalize_image(image)
-        patches, coords, scales, descriptors = self._describe_target(image)
+        patches, coords, scales, thetas, descriptors = self._describe_target(image)
         # Evict only once the new target is ready, so a failure above costs nothing.
         self._evict_lru_if_needed()
         self.index.add(image_id, descriptors)
+        if jpeg_sigma is None:
+            jpeg_sigma = (quantization_sigma(image_path) if image_path else None) or 0.0
         self._targets[image_id] = _Target(
             shape=(int(image.shape[0]), int(image.shape[1])),
             path=image_path,
             patches=patches,
             coords=coords,
             scales=scales,
+            jpeg_sigma=float(jpeg_sigma),
+            thetas=thetas,
         )
         return len(patches)
 
     def _describe_target(self, image: np.ndarray):
-        """Patches, full-res coords, scales and descriptors for one target, flat patches removed."""
+        """Patches, full-res coords, scales, orientations and descriptors for one target, flat patches removed."""
         if self.pyramid is not None:
             pyr = self.pyramid.extract_patches(image, self.extractor)
             patches, coords, scales = pyr.patches, pyr.original_coords, pyr.scales
-        else:
-            col = self.extractor.extract(image)
-            patches, coords = col.patches, col.coords
-            scales = np.ones(len(patches), dtype=np.float32)
+            descriptors, keep = self.descriptor.compute_batch(patches)
+            return patches[keep], coords[keep], scales[keep], np.zeros(int(keep.sum())), descriptors[keep]
+        patches, coords, thetas, descriptors = self._extract(image)
+        return patches, coords, np.ones(len(patches), dtype=np.float32), thetas, descriptors
+
+    def _extract(self, image: np.ndarray):
+        """Patches, coords, orientations and descriptors at full resolution, flat patches removed.
+
+        In rotation-invariant mode each patch is resampled in its own canonical
+        orientation, so descriptors and fits compare like with like.
+        """
+        col = self.extractor.extract(image)
+        patches, coords = col.patches, col.coords
+        thetas = np.zeros(len(patches))
+        if self.config.rotation_invariant and len(patches):
+            thetas = patch_orientations(image, coords, self.config.patch_size)
+            patches = canonical_patches(image, coords, self.config.patch_size, thetas)
         descriptors, keep = self.descriptor.compute_batch(patches)
-        return patches[keep], coords[keep], scales[keep], descriptors[keep]
+        return patches[keep], coords[keep], thetas[keep], descriptors[keep]
 
     def _evict_lru_if_needed(self) -> None:
         if self.config.max_targets is None:
@@ -417,6 +451,7 @@ class ForensicsEngine:
         source_image: np.ndarray,
         target_ids: Optional[List[str]] = None,
         return_heatmap: bool = True,
+        jpeg_sigma: float = 0.0,
     ) -> MatchResult:
         """
         Match source image against indexed targets.
@@ -425,6 +460,8 @@ class ForensicsEngine:
             source_image: RGB image to search for
             target_ids: Optional list of specific targets to match against
             return_heatmap: Whether to generate a target heatmap for the best match
+            jpeg_sigma: the source's JPEG rounding error; use
+                ``spade.jpeg.quantization_sigma(path)`` for a file
 
         Returns:
             MatchResult. ``coherent_regions`` are sorted most significant first;
@@ -432,9 +469,7 @@ class ForensicsEngine:
         """
         source_image = self._normalize_image(source_image)
         source_shape = (int(source_image.shape[0]), int(source_image.shape[1]))
-        collection = self.extractor.extract(source_image)
-        descriptors, keep = self.descriptor.compute_batch(collection.patches)
-        src_patches, src_coords, descriptors = collection.patches[keep], collection.coords[keep], descriptors[keep]
+        src_patches, src_coords, src_thetas, descriptors = self._extract(source_image)
 
         if len(src_patches) == 0 or self.index.size == 0:
             return MatchResult(
@@ -443,7 +478,7 @@ class ForensicsEngine:
             )
 
         candidates, verified_per_target = self._verified_candidates(
-            src_patches, src_coords, descriptors, target_ids
+            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma
         )
         matches = candidates.matches
 
@@ -452,7 +487,7 @@ class ForensicsEngine:
         regions: List[CoherentRegion] = []
         if self.config.coherence_enabled and matches:
             regions = self._significant_regions(
-                candidates, src_patches, src_coords, verified_per_target, n_tests
+                candidates, src_patches, src_coords, verified_per_target, n_tests, jpeg_sigma
             )
 
         best_match = None
@@ -481,6 +516,37 @@ class ForensicsEngine:
             localization=localization,
         )
 
+    def match_self(
+        self, image: np.ndarray, min_offset: Optional[int] = None, jpeg_sigma: float = 0.0
+    ) -> MatchResult:
+        """Find regions copied within one image (copy-move).
+
+        The image is matched against itself, ignoring offsets shorter than
+        ``min_offset`` (default: twice the patch size) so a region doesn't
+        match its own neighbourhood. Each duplicated pair is reported once, as
+        a region whose source and target are the two copies; which one is the
+        original can't be told from the image alone. ``localization`` covers
+        both copies. Doesn't touch this engine's index.
+        """
+        engine = ForensicsEngine(dataclasses.replace(self.config, pyramid_enabled=False, max_targets=None))
+        engine._self_min_offset = min_offset if min_offset is not None else 2 * self.config.patch_size
+        image = self._normalize_image(image)
+        engine.index_target(image, "self", jpeg_sigma=jpeg_sigma)
+        result = engine.match(image, return_heatmap=False, jpeg_sigma=jpeg_sigma)
+        shape = image.shape[:2]
+        both = np.zeros(shape, dtype=bool)
+        for region in result.significant_regions:
+            for m in region.matches:
+                for x, y in (m.source_coord, m.target_coord):
+                    both[y:y + m.patch_size, x:x + m.patch_size] = True
+        result.localization = Localization(
+            mask=both,
+            bbox=mask_to_bbox(both),
+            area=int(both.sum()),
+            area_fraction=float(both.sum()) / float(shape[0] * shape[1]),
+        )
+        return result
+
     @staticmethod
     def _stats(n_source: int, n_matches: int, regions: List[CoherentRegion]) -> Dict[str, Any]:
         return {
@@ -490,9 +556,20 @@ class ForensicsEngine:
             "significant_regions": sum(1 for r in regions if r.significant),
         }
 
-    def _verified_candidates(self, src_patches, src_coords, descriptors, target_ids):
+    def _noise_model(self, image_id: str, source_jpeg_sigma: float) -> ProbabilityModel:
+        """Residual noise for a pair: base noise plus both sides' JPEG rounding error."""
+        target_sigma = self._targets[image_id].jpeg_sigma
+        sigma = np.sqrt(self.config.noise_sigma ** 2 + source_jpeg_sigma ** 2 + target_sigma ** 2)
+        return ProbabilityModel(noise_sigma=float(sigma))
+
+    def _verified_candidates(self, src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma=0.0):
         """k-NN search plus the per-patch chi-square pre-filter, vectorized."""
-        hits = self.index.search(descriptors, self.config.k_neighbors)
+        k = self.config.k_neighbors
+        if self._self_min_offset is not None:
+            # A patch's nearest neighbours in its own image are mostly itself and
+            # its slightly shifted copies; ask for more so real duplicates survive.
+            k = 4 * k
+        hits = self.index.search(descriptors, k)
         valid = (hits.owner >= 0) & (hits.distances <= self.config.distance_threshold)
         if target_ids is not None:
             wanted = set(target_ids)
@@ -512,6 +589,14 @@ class ForensicsEngine:
                 continue
             sel = owners == owner
             src_idx, tgt_idx = rows[sel], tgt_all[sel]
+            noise = self._noise_model(image_id, jpeg_sigma)
+            if self._self_min_offset is not None:
+                offset = target.coords[tgt_idx] - src_coords[src_idx]
+                # Drop trivial self-matches, and keep one direction of each copy
+                # pair (A->B and B->A are the same evidence).
+                forward = (offset[:, 0] > 0) | ((offset[:, 0] == 0) & (offset[:, 1] > 0))
+                keep = forward & (np.abs(offset).max(axis=1) >= self._self_min_offset)
+                src_idx, tgt_idx = src_idx[keep], tgt_idx[keep]
 
             for start in range(0, len(src_idx), _FIT_CHUNK):
                 s_chunk = src_idx[start:start + _FIT_CHUNK]
@@ -523,7 +608,7 @@ class ForensicsEngine:
                     luminance(tgt_chunk).reshape(len(t_chunk), -1),
                     usable,
                 )
-                prob = self.probability_model.compute(rss, usable.sum(axis=1) - 2)
+                prob = noise.compute(rss, usable.sum(axis=1) - 2)
                 ok = np.nonzero(prob >= self.config.min_probability)[0]
                 for j in ok:
                     ti = t_chunk[j]
@@ -534,6 +619,7 @@ class ForensicsEngine:
                         probability=float(prob[j]),
                         image_id=image_id,
                         target_scale=float(target.scales[ti]),
+                        rotation=float(_wrap_angle(target.thetas[ti] - src_thetas[s_chunk[j]])),
                     ))
                 src_out.append(s_chunk[ok])
                 tgt_out.append(t_chunk[ok])
@@ -565,15 +651,23 @@ class ForensicsEngine:
             (sw + self._targets[t].shape[1]) * (sh + self._targets[t].shape[0]) / window * n_scales
             for t in searched
         )
-        return max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+        n_tests = max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+        if cfg.rotation_invariant:
+            n_tests *= np.pi / _ANGLE_TOLERANCE  # rotation hypotheses
+        return n_tests
 
-    def _significant_regions(self, candidates, src_patches, src_coords, verified_per_target, n_tests):
+    def _significant_regions(self, candidates, src_patches, src_coords, verified_per_target, n_tests, jpeg_sigma):
         """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA."""
-        clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
+        cfg = self.config
+        if cfg.rotation_invariant:
+            clusters = find_rigid_regions(
+                candidates.matches, cfg.coherence_offset_tolerance, cfg.coherence_min_cluster, _ANGLE_TOLERANCE
+            )
+        else:
+            clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
         clusters.sort(key=lambda r: len(r.matches), reverse=True)
         row_of = {id(m): i for i, m in enumerate(candidates.matches)}
 
-        cfg = self.config
         n_source = len(src_patches)
         overlap = overlap_factor(cfg.patch_size, cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
@@ -592,13 +686,14 @@ class ForensicsEngine:
             # The transform is shared by the region, so each patch keeps one
             # degree of freedom per usable pixel.
             rss = (usable * (residual @ LUMA) ** 2).sum(axis=1)
-            prob = self.probability_model.compute(rss, usable.sum(axis=1))
+            prob = self._noise_model(cluster.image_id, jpeg_sigma).compute(rss, usable.sum(axis=1))
             consistent = prob >= cfg.min_probability
             inliers = [m for m, ok in zip(cluster.matches, consistent) if ok]
             if len(inliers) < cfg.coherence_min_cluster:
                 continue
 
             region = make_region(cluster.offset, inliers, cluster.image_id)
+            region.rotation = cluster.rotation
             region.color_M, region.color_b = M, b
             for m in inliers:
                 m.color_M, m.color_b = M, b
@@ -614,6 +709,9 @@ class ForensicsEngine:
             n = max(int(in_box.sum()), k)
             n_target = max(self.index.count(cluster.image_id), 1)
             p = min(1.0, verified_per_target[cluster.image_id] / (n_source * n_target) * window)
+            if cfg.rotation_invariant:
+                # A chance match must also agree on the angle.
+                p *= _ANGLE_TOLERANCE / np.pi
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
             region.n_tests = n_tests
@@ -655,7 +753,9 @@ class ForensicsEngine:
         state = {
             "version": _BUNDLE_VERSION,
             "config": self.config.to_dict(),
-            "targets": [[image_id, t.path, t.shape[0], t.shape[1]] for image_id, t in self._targets.items()],
+            "targets": [
+                [image_id, t.path, t.shape[0], t.shape[1], t.jpeg_sigma] for image_id, t in self._targets.items()
+            ],
         }
         _atomic_write(f"{path}.engine.json", lambda tmp: _write_json(tmp, state))
 
@@ -683,8 +783,8 @@ class ForensicsEngine:
         if index.dim != engine.descriptor.dim:
             raise IndexStoreError(f"index dim {index.dim} doesn't match descriptor dim {engine.descriptor.dim}")
         engine.index = index
-        for image_id, image_path, h, w in state["targets"]:
-            engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path)
+        for image_id, image_path, h, w, jpeg_sigma in state["targets"]:
+            engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path, jpeg_sigma=jpeg_sigma)
         return engine
 
     def _load_target(self, image_id: str) -> Optional[_Target]:
@@ -696,11 +796,11 @@ class ForensicsEngine:
             logger.warning(f"Can't verify matches against '{image_id}': image file not available")
             return None
         image = self._normalize_image(load_image(target.path))
-        patches, coords, scales, _ = self._describe_target(image)
+        patches, coords, scales, thetas, _ = self._describe_target(image)
         if len(patches) != self.index.count(image_id):
             logger.warning(f"'{image_id}' changed on disk since it was indexed; skipping it")
             return None
-        target.patches, target.coords, target.scales = patches, coords, scales
+        target.patches, target.coords, target.scales, target.thetas = patches, coords, scales, thetas
         return target
 
     # ------------------------------------------------------------------
@@ -751,6 +851,10 @@ class ForensicsEngine:
     def has_target(self, image_id: str) -> bool:
         """Check if target is indexed."""
         return image_id in self._targets
+
+
+def _wrap_angle(angle):
+    return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
 def _usable_pixels(source: np.ndarray, target: np.ndarray) -> np.ndarray:

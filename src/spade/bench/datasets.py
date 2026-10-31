@@ -30,8 +30,11 @@ from PIL import Image
 from spade.bench.synthetic import (
     SpliceSample,
     _apply_color_transform,
+    _apply_tone_curve,
     _jpeg_roundtrip,
     _random_color_transform,
+    _random_tone_curve,
+    make_copy_move,
     make_negative_pair,
     make_recolored_splice,
 )
@@ -97,6 +100,26 @@ def _textured_spot(rng: np.random.RandomState, img: np.ndarray, size: int, tries
     return best
 
 
+def _cut_fragment(rng, image, size, rotation, flip):
+    """A size x size textured fragment, optionally rotated (uniform in +-rotation degrees) and mirrored.
+
+    Cut from a larger window and rotated about its centre, so the fragment is
+    all real content (no empty corners). Returns (fragment uint8, info dict).
+    """
+    window = int(np.ceil(size * 1.5)) + 2 if rotation else size
+    x, y = _textured_spot(rng, image, window)
+    patch = image[y:y + window, x:x + window]
+    angle = float(rng.uniform(-rotation, rotation)) if rotation else 0.0
+    if angle:
+        patch = np.asarray(Image.fromarray(patch).rotate(angle, resample=Image.BICUBIC))
+    off = (window - size) // 2
+    fragment = patch[off:off + size, off:off + size]
+    mirrored = bool(flip and rng.rand() < 0.5)
+    if mirrored:
+        fragment = fragment[:, ::-1]
+    return np.ascontiguousarray(fragment), {"window": (x, y, window), "angle": angle, "mirrored": mirrored}
+
+
 def photo_splices(
     n: int,
     negatives: int = 0,
@@ -105,8 +128,15 @@ def photo_splices(
     color_grade_strength: float = 0.15,
     jpeg_quality: Optional[int] = 90,
     seed: int = 0,
+    tone_curve_strength: float = 0.0,
+    rotation: float = 0.0,
+    flip: bool = False,
 ) -> List[SpliceSample]:
-    """``n`` recolored splices between different photos, plus ``negatives`` unrelated crops."""
+    """``n`` recolored splices between different photos, plus ``negatives`` unrelated crops.
+
+    ``rotation`` (max degrees) and ``flip`` (mirror half the fragments) make
+    geometric variants.
+    """
     photos = load_photos()
     names = sorted(photos)
     rng = np.random.RandomState(seed)
@@ -117,10 +147,13 @@ def photo_splices(
         donor = _random_crop(rng, photos[donor_name], crop_size)
         host = _random_crop(rng, photos[host_name], crop_size)
 
-        fx, fy = _textured_spot(rng, donor, fragment_size)
-        region = donor[fy:fy + fragment_size, fx:fx + fragment_size].astype(np.float32) / 255.0
+        fragment, geometry = _cut_fragment(rng, donor, fragment_size, rotation, flip)
+        region = fragment.astype(np.float32) / 255.0
         M, b = _random_color_transform(rng, color_grade_strength)
-        recolored = (_apply_color_transform(region, M, b) * 255).astype(np.uint8)
+        recolored = _apply_color_transform(region, M, b)
+        if tone_curve_strength > 0:
+            recolored = _apply_tone_curve(recolored, _random_tone_curve(rng, tone_curve_strength))
+        recolored = (recolored * 255).astype(np.uint8)
 
         lx = rng.randint(0, crop_size - fragment_size + 1)
         ly = rng.randint(0, crop_size - fragment_size + 1)
@@ -139,7 +172,7 @@ def photo_splices(
             color_M=M,
             color_b=b,
             params={"source": "photos", "index": i, "donor": donor_name, "host": host_name,
-                    "donor_region": (fx, fy, fragment_size, fragment_size), "jpeg_quality": jpeg_quality},
+                    "jpeg_quality": jpeg_quality, **geometry},
         ))
 
     for i in range(negatives):
@@ -154,6 +187,49 @@ def photo_splices(
             params={"source": "photos", "index": i, "donor": a, "host": b_name, "negative": True},
             label=0,
         ))
+    return samples
+
+
+def photo_copy_moves(
+    n: int,
+    negatives: int = 0,
+    crop_size: int = 192,
+    fragment_size: int = 40,
+    color_grade_strength: float = 0.0,
+    jpeg_quality: Optional[int] = 90,
+    seed: int = 0,
+    rotation: float = 0.0,
+    flip: bool = False,
+) -> List[SpliceSample]:
+    """Within-image copy-moves on photo crops (``donor`` is None), plus untouched crops."""
+    photos = load_photos()
+    names = sorted(photos)
+    rng = np.random.RandomState(seed)
+    samples = []
+    fs = fragment_size
+    for i in range(n + negatives):
+        name = names[rng.randint(len(names))]
+        image = np.ascontiguousarray(_random_crop(rng, photos[name], crop_size))
+        mask = np.zeros(image.shape[:2], dtype=bool)
+        params = {"source": "photos", "index": i, "photo": name, "jpeg_quality": jpeg_quality}
+        if i < n:
+            fragment, geometry = _cut_fragment(rng, image, fs, rotation, flip)
+            wx, wy, window = geometry["window"]
+            sx, sy = wx + (window - fs) // 2, wy + (window - fs) // 2
+            while True:
+                dx, dy = rng.randint(0, crop_size - fs + 1, size=2)
+                if abs(int(dx) - sx) >= fs or abs(int(dy) - sy) >= fs:
+                    break
+            region = fragment.astype(np.float32) / 255.0
+            M, b = _random_color_transform(rng, color_grade_strength)
+            image = image.copy()
+            image[dy:dy + fs, dx:dx + fs] = (_apply_color_transform(region, M, b) * 255).astype(np.uint8)
+            mask[sy:sy + fs, sx:sx + fs] = True
+            mask[dy:dy + fs, dx:dx + fs] = True
+            params.update(copy_move=True, source_region=(sx, sy, fs, fs), bbox=(int(dx), int(dy), fs, fs), **geometry)
+        if jpeg_quality is not None:
+            image = _jpeg_roundtrip(image, jpeg_quality)
+        samples.append(SpliceSample(donor=None, tampered=image, mask=mask, params=params, label=int(i < n)))
     return samples
 
 
@@ -204,8 +280,14 @@ def casia2(
     n: Optional[int] = None,
     negatives: int = 0,
     seed: int = 0,
+    copy_move: bool = False,
 ) -> List[SpliceSample]:
     """CASIA v2 cross-image splices as (donor, tampered, mask) pairs.
+
+    With ``copy_move=True``: the within-image forgeries (``Tp_S_*``) instead,
+    with ``donor=None``; negatives are untouched authentic images. CASIA's
+    masks mark the pasted copy only, so localization recall is the fair
+    number there (SPADE also marks the original).
 
     Args:
         root: dataset folder containing ``CASIA2/{Au,Tp,CASIA 2 Groundtruth}``;
@@ -223,6 +305,8 @@ def casia2(
         )
 
     rng = np.random.RandomState(seed)
+    if copy_move:
+        return _casia2_copy_moves(tp_dir, gt_dir, au_dir, rng, n, negatives)
     candidates = sorted(p for p in tp_dir.iterdir() if p.name.startswith("Tp_D_"))
     rng.shuffle(candidates)
 
@@ -242,15 +326,18 @@ def casia2(
         mask = np.asarray(Image.open(gt_path).convert("L")) > 127
         if mask.shape != tampered.shape[:2] or not mask.any() or mask.all():
             continue
-        split = _split_donor_host(tampered, mask, _read_rgb(path_a), _read_rgb(path_b))
+        image_a, image_b = _read_rgb(path_a), _read_rgb(path_b)
+        split = _split_donor_host(tampered, mask, image_a, image_b)
         if split is None:
             continue
         donor, _ = split
+        donor_path = path_a if donor is image_a else path_b
         samples.append(SpliceSample(
             donor=donor,
             tampered=tampered,
             mask=mask,
-            params={"source": "casia2", "tampered": tp_path.name, "ids": (id_a, id_b)},
+            params={"source": "casia2", "tampered": tp_path.name, "ids": (id_a, id_b),
+                    "tampered_path": str(tp_path), "donor_path": str(donor_path)},
         ))
 
     if negatives and samples:
@@ -267,9 +354,37 @@ def casia2(
                 donor=_read_rgb(other),
                 tampered=pos.tampered,
                 mask=np.zeros_like(pos.mask),
-                params={"source": "casia2", "tampered": pos.params["tampered"], "donor": other.name, "negative": True},
+                params={"source": "casia2", "tampered": pos.params["tampered"], "donor": other.name, "negative": True,
+                        "tampered_path": pos.params["tampered_path"], "donor_path": str(other)},
                 label=0,
             ))
+    return samples
+
+
+def _casia2_copy_moves(tp_dir, gt_dir, au_dir, rng, n, negatives) -> List[SpliceSample]:
+    candidates = sorted(p for p in tp_dir.iterdir() if p.name.startswith("Tp_S_"))
+    rng.shuffle(candidates)
+    samples: List[SpliceSample] = []
+    for tp_path in candidates:
+        if n is not None and len(samples) >= n:
+            break
+        gt_path = gt_dir / f"{tp_path.stem}_gt.png"
+        if not gt_path.exists():
+            continue
+        tampered = _read_rgb(tp_path)
+        mask = np.asarray(Image.open(gt_path).convert("L")) > 127
+        if mask.shape != tampered.shape[:2] or not mask.any() or mask.all():
+            continue
+        samples.append(SpliceSample(donor=None, tampered=tampered, mask=mask,
+                                    params={"source": "casia2", "tampered": tp_path.name, "copy_move": True,
+                                            "tampered_path": str(tp_path)}))
+    au_paths = sorted(p for p in au_dir.iterdir() if p.name.startswith("Au_"))
+    for i in rng.choice(len(au_paths), min(negatives, len(au_paths)), replace=False):
+        image = _read_rgb(au_paths[i])
+        samples.append(SpliceSample(donor=None, tampered=image, mask=np.zeros(image.shape[:2], bool),
+                                    params={"source": "casia2", "tampered": au_paths[i].name, "negative": True,
+                                            "tampered_path": str(au_paths[i])},
+                                    label=0))
     return samples
 
 
@@ -305,15 +420,28 @@ def manifest(path: str) -> List[SpliceSample]:
 
 # ----------------------------------------------------------------------
 
-def synthetic(n: int, negatives: int = 0, seed: int = 0, **kwargs) -> List[SpliceSample]:
+def synthetic(n: int, negatives: int = 0, seed: int = 0, copy_move: bool = False, **kwargs) -> List[SpliceSample]:
     """The procedural generator, in the same shape as the other sources."""
-    pos = [make_recolored_splice(seed=seed + i, **kwargs) for i in range(n)]
     image_size = kwargs.get("image_size", 96)
+    if copy_move:
+        kwargs.pop("tone_curve_strength", None)
+        pos = [make_copy_move(seed=seed + i, **kwargs) for i in range(n)]
+        neg = []
+        for i in range(negatives):
+            clean = make_negative_pair(seed=10_000 + seed + i, image_size=image_size)
+            clean.donor = None
+            neg.append(clean)
+        return pos + neg
+    pos = [make_recolored_splice(seed=seed + i, **kwargs) for i in range(n)]
     neg = [make_negative_pair(seed=10_000 + seed + i, image_size=image_size) for i in range(negatives)]
     return pos + neg
 
 
-SOURCES = {"synthetic": synthetic, "photos": photo_splices, "casia2": casia2, "manifest": manifest}
+def photos(copy_move: bool = False, **kwargs) -> List[SpliceSample]:
+    return photo_copy_moves(**kwargs) if copy_move else photo_splices(**kwargs)
+
+
+SOURCES = {"synthetic": synthetic, "photos": photos, "casia2": casia2, "manifest": manifest}
 
 
 def load(name: str, **kwargs) -> List[SpliceSample]:

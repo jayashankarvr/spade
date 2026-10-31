@@ -56,6 +56,13 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - **False discovery rate across searches**: `spade.verification.nfa.fdr_select` (Benjamini-Hochberg over every region hypothesis) and `spade scan INDEX IMAGES... --fdr Q`. Regions carry `n_tests` and `log10_p`; results carry `stats["n_tests"]`.
 - Tried and dropped because they didn't hold up on the calibration benchmark: per-patch "rarity" chance rates in the NFA (either lost half the recall on JPEG photos or broke the false-alarm guarantee) and a sensor-noise residual check (JPEG removes chroma noise; luminance residuals are already correlated by the matching itself).
 
+### Added (geometry and photometry)
+- **Copy-move within one image**: `ForensicsEngine.match_self(image)`. Synthetic benchmark: IoU 0.83, detection AUC 1.0, calibrated. On real photos repetitive textures are reported as duplicated (they are); not yet calibrated there.
+- **JPEG-aware noise**: `spade.jpeg.quantization_sigma` reads a file's quantization tables; pairs are tested against base noise plus both sides' rounding error. `index_target(..., jpeg_sigma=)` (read from `image_path` when omitted), `match(..., jpeg_sigma=)`; CLI and API do it automatically. Photo splices at JPEG 75: IoU 0.72 -> 0.76 with no false regions.
+- **Rotation-invariant matching (experimental, off by default)**: `Config(rotation_invariant=True)` - canonical patch orientation (intensity centroid) plus rigid-transform clustering; `Match.rotation`, `CoherentRegion.rotation`.
+- Benchmark: `--task copymove`, `--rotation`, `--flip`, `--curve` (tone curves) options; CASIA v2 `Tp_S` copy-moves.
+- Tried and dropped: isotonic tone-curve fitting (the affine fit already handles strong Curves/gamma edits as well or better).
+
 ### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
 - **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.

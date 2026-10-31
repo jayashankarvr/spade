@@ -20,6 +20,9 @@ class Match:
     color_b: Optional[np.ndarray] = None
     # Pyramid level the target patch came from (1.0 = full resolution).
     target_scale: float = 1.0
+    # Target patch orientation minus source patch orientation, radians
+    # (rotation-invariant mode only).
+    rotation: float = 0.0
 
 
 class SpatialAggregator:

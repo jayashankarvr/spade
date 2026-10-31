@@ -16,6 +16,7 @@ except ImportError:
 from spade import __version__
 from spade.engine import ForensicsEngine, Config, load_image
 from spade.exceptions import ConfigurationError
+from spade.jpeg import quantization_sigma
 
 
 def main():
@@ -134,7 +135,7 @@ def match(
 
     if verbose:
         click.echo("Indexing target...")
-    num_patches = engine.index_target(target_img, "target")
+    num_patches = engine.index_target(target_img, "target", jpeg_sigma=quantization_sigma(target) or 0.0)
     if num_patches == 0:
         raise click.ClickException(
             "No textured patches in target. "
@@ -143,7 +144,7 @@ def match(
     if verbose:
         click.echo(f"  Indexed {num_patches} patches")
         click.echo("Matching...")
-    result = engine.match(source_img)
+    result = engine.match(source_img, jpeg_sigma=quantization_sigma(source) or 0.0)
 
     click.echo(f"\nSource patches: {result.stats['source_patches']}")
     click.echo(f"Patch matches: {result.stats['total_matches']}")
@@ -245,7 +246,7 @@ def search(
     source_img = safe_load_image(source)
     if verbose:
         click.echo("Searching...")
-    result = engine.match(source_img, return_heatmap=False)
+    result = engine.match(source_img, return_heatmap=False, jpeg_sigma=quantization_sigma(source) or 0.0)
 
     click.echo(f"\nSource patches: {result.stats['source_patches']}")
     click.echo(f"Patch matches: {result.stats['total_matches']}")
@@ -274,7 +275,9 @@ def scan(index_file: str, sources, fdr: float):
     results = {}
     with click.progressbar(sources, label="Searching") as progress:
         for path in progress:
-            results[path] = engine.match(safe_load_image(path), return_heatmap=False)
+            results[path] = engine.match(
+                safe_load_image(path), return_heatmap=False, jpeg_sigma=quantization_sigma(path) or 0.0
+            )
 
     selected = fdr_select(list(results.values()), q=fdr)
     owner = {id(r): path for path, res in results.items() for r in res.coherent_regions}

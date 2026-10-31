@@ -24,6 +24,8 @@ class CoherentRegion:
     color_b: Optional[np.ndarray] = None
     log10_nfa: Optional[float] = None
     max_log10_nfa: float = 0.0
+    # Rotation-invariant mode: target = R(rotation) @ source + offset, about patch centres.
+    rotation: float = 0.0
     # Region hypotheses tried in the search that produced this region; NFA is
     # n_tests times the region's own p-value (used for FDR across searches).
     n_tests: Optional[float] = None
@@ -116,6 +118,93 @@ class SpatialCoherenceVerifier:
             claimed.update(window)
             clusters.append((peak, members))
         return clusters
+
+
+def _wrap(angle: np.ndarray) -> np.ndarray:
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def _rotate(points: np.ndarray, theta: float) -> np.ndarray:
+    c, s = np.cos(theta), np.sin(theta)
+    return np.stack([c * points[:, 0] - s * points[:, 1], s * points[:, 0] + c * points[:, 1]], axis=1)
+
+
+def find_rigid_regions(
+    matches: List,
+    offset_tolerance: int = 2,
+    min_cluster_size: int = 3,
+    angle_tolerance: float = np.radians(15),
+    seeds: int = 200,
+    max_regions: int = 100,
+) -> List[CoherentRegion]:
+    """Group matches that agree on one rotation + translation (rotation-invariant mode).
+
+    Every match already implies a rotation (its ``rotation``) and, with it, a
+    translation, so one match is a full hypothesis. Repeatedly: score a few
+    hundred matches as seeds by how many others agree (angle within
+    ``angle_tolerance``, predicted target centre within the offset tolerance,
+    loosened for the seed's own angle error), keep the best, refine its angle
+    by least squares over the agreeing centres (better than any single
+    patch's angle), take the final inliers, and remove them.
+
+    The region's ``offset`` is the translation and ``rotation`` the angle,
+    with target centre = R(rotation) @ source centre + offset. Stops after
+    ``max_regions``: past that point, what's left are chance clusters of a
+    few matches that couldn't reach significance anyway.
+    """
+    rng = np.random.RandomState(0)
+    tol = max(offset_tolerance, 1)
+    regions = []
+    by_image: Dict[str, List] = defaultdict(list)
+    for m in matches:
+        by_image[m.image_id].append(m)
+
+    for image_id, group in by_image.items():
+        half = (group[0].patch_size - 1) / 2.0
+        src = np.array([m.source_coord for m in group], dtype=np.float64) + half
+        tgt = np.array([m.target_coord for m in group], dtype=np.float64) + half
+        rot = np.array([m.rotation for m in group], dtype=np.float64)
+        alive = np.ones(len(group), dtype=bool)
+        # Matches sorted by angle (with a wrapped copy at both ends), so each seed
+        # only looks at the ~1/12 of matches whose angle can agree with it.
+        order = np.argsort(rot)
+        ext_rot = np.concatenate([rot[order] - 2 * np.pi, rot[order], rot[order] + 2 * np.pi])
+        ext_idx = np.concatenate([order, order, order])
+
+        def agreeing(seed: int, theta: float, shift: np.ndarray, slack: float) -> np.ndarray:
+            lo, hi = np.searchsorted(ext_rot, [theta - angle_tolerance, theta + angle_tolerance + 1e-12])
+            cand = np.unique(ext_idx[lo:hi])
+            cand = cand[alive[cand]]
+            pred = _rotate(src[cand], theta) + shift
+            return cand[np.abs(pred - tgt[cand]).max(axis=1) <= slack]
+
+        while alive.sum() >= min_cluster_size and len(regions) < max_regions:
+            remaining = np.nonzero(alive)[0]
+            best = None
+            for seed in rng.choice(remaining, min(seeds, len(remaining)), replace=False):
+                theta = rot[seed]
+                shift = tgt[seed] - _rotate(src[seed:seed + 1], theta)[0]
+                members = agreeing(seed, theta, shift, 2 * tol + 2)
+                if best is None or len(members) > len(best):
+                    best = members
+            if best is None or len(best) < min_cluster_size:
+                break
+            # Least-squares rotation of the agreeing centres, then the final inliers.
+            a = src[best] - src[best].mean(axis=0)
+            b = tgt[best] - tgt[best].mean(axis=0)
+            theta = float(np.arctan2((a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]).sum(), (a * b).sum()))
+            shift = tgt[best].mean(axis=0) - _rotate(src[best].mean(axis=0)[None, :], theta)[0]
+            inliers = agreeing(-1, theta, shift, tol)
+            if len(inliers) < min_cluster_size:
+                alive[best] = False
+                continue
+            region = make_region((int(round(shift[0])), int(round(shift[1]))), [group[i] for i in inliers], image_id)
+            region.rotation = theta
+            regions.append(region)
+            alive[inliers] = False
+
+    regions.sort(key=lambda r: r.confidence, reverse=True)
+    return regions
 
 
 def make_region(offset: Tuple[int, int], cluster: List, image_id: str = "") -> CoherentRegion:

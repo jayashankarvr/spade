@@ -91,6 +91,18 @@ def _apply_color_transform(region01: np.ndarray, M: np.ndarray, b: np.ndarray) -
     return np.clip(out, 0.0, 1.0).reshape(region01.shape)
 
 
+def _random_tone_curve(rng: np.random.RandomState, strength: float) -> np.ndarray:
+    """Per-channel gamma exponents, exp(strength * U(-1, 1)): monotone but not affine.
+
+    Stands in for Curves / gamma edits. strength 0.4 means gammas in about [0.67, 1.5].
+    """
+    return np.exp(strength * rng.uniform(-1.0, 1.0, size=3))
+
+
+def _apply_tone_curve(region01: np.ndarray, gammas: np.ndarray) -> np.ndarray:
+    return np.clip(region01, 0.0, 1.0) ** gammas
+
+
 def _jpeg_roundtrip(image_u8: np.ndarray, quality: int) -> np.ndarray:
     """Recompress through JPEG at the given quality (simulates re-saving)."""
     import io
@@ -108,6 +120,7 @@ def make_recolored_splice(
     color_grade_strength: float = 0.15,
     jpeg_quality: Optional[int] = None,
     splice_upscale: float = 1.0,
+    tone_curve_strength: float = 0.0,
 ) -> SpliceSample:
     """Generate one recolored-splice sample with ground truth.
 
@@ -117,6 +130,8 @@ def make_recolored_splice(
         fragment_size: side length of the spliced square region.
         color_grade_strength: magnitude of the recoloring (0 = none).
         jpeg_quality: if set, JPEG-recompress the tampered image at this quality.
+        tone_curve_strength: if > 0, a random per-channel gamma follows the
+            color grade (a monotone, non-affine edit like Curves).
         splice_upscale: if > 1, the fragment is downscaled by this factor then
             scaled back up before pasting, so it carries the blur of a resized
             splice (a lower native scale than the host) - exercises the
@@ -135,6 +150,8 @@ def make_recolored_splice(
 
     M, b = _random_color_transform(rng, color_grade_strength)
     recolored = _apply_color_transform(region01, M, b)
+    if tone_curve_strength > 0:
+        recolored = _apply_tone_curve(recolored, _random_tone_curve(rng, tone_curve_strength))
     recolored_u8 = (recolored * 255).astype(np.uint8)
 
     if splice_upscale > 1.0:
@@ -171,6 +188,7 @@ def make_recolored_splice(
             "color_grade_strength": color_grade_strength,
             "jpeg_quality": jpeg_quality,
             "splice_upscale": splice_upscale,
+            "tone_curve_strength": tone_curve_strength,
             "donor_region": (fx, fy, fs, fs),
         },
     )
@@ -195,4 +213,47 @@ def make_negative_pair(seed: int = 0, image_size: int = 96) -> SpliceSample:
         color_b=np.zeros(3),
         params={"seed": seed, "image_size": image_size, "negative": True},
         label=0,
+    )
+
+
+def make_copy_move(
+    seed: int = 0,
+    image_size: int = 96,
+    fragment_size: int = 24,
+    color_grade_strength: float = 0.0,
+    jpeg_quality: Optional[int] = None,
+) -> SpliceSample:
+    """One within-image copy-move: a region duplicated elsewhere in the same image.
+
+    ``donor`` is None (the image is its own source) and the mask marks both
+    the original and the pasted copy; ``bbox`` is the pasted copy.
+    """
+    rng = np.random.RandomState(seed)
+    image = _textured_image(rng, image_size, image_size)
+    fs = min(fragment_size, image_size // 2)
+
+    # Source and destination far enough apart not to overlap.
+    while True:
+        sx, sy, dx, dy = rng.randint(0, image_size - fs + 1, size=4)
+        if abs(int(sx) - int(dx)) >= fs or abs(int(sy) - int(dy)) >= fs:
+            break
+    region01 = image[sy:sy + fs, sx:sx + fs].astype(np.float32) / 255.0
+    M, b = _random_color_transform(rng, color_grade_strength)
+    tampered = image.copy()
+    tampered[dy:dy + fs, dx:dx + fs] = (_apply_color_transform(region01, M, b) * 255).astype(np.uint8)
+    if jpeg_quality is not None:
+        tampered = _jpeg_roundtrip(tampered, jpeg_quality)
+
+    mask = np.zeros((image_size, image_size), dtype=bool)
+    mask[sy:sy + fs, sx:sx + fs] = True
+    mask[dy:dy + fs, dx:dx + fs] = True
+    return SpliceSample(
+        donor=None,
+        tampered=tampered,
+        mask=mask,
+        bbox=(int(dx), int(dy), fs, fs),
+        color_M=M,
+        color_b=b,
+        params={"seed": seed, "copy_move": True, "source_region": (int(sx), int(sy), fs, fs),
+                "jpeg_quality": jpeg_quality, "color_grade_strength": color_grade_strength},
     )

@@ -57,12 +57,18 @@ def score_samples(samples: Sequence, config=None) -> List[SampleRecord]:
     for sample in samples:
         start = time.perf_counter()
         engine = ForensicsEngine(config)
-        engine.index_target(sample.donor, "donor")
-        result = engine.match(sample.tampered, return_heatmap=False)
+        source_sigma, donor_sigma = _jpeg_sigmas(sample)
+        if sample.donor is None:  # copy-move: the image is its own source
+            result = engine.match_self(sample.tampered, jpeg_sigma=source_sigma)
+        else:
+            engine.index_target(sample.donor, "donor", jpeg_sigma=donor_sigma)
+            result = engine.match(sample.tampered, return_heatmap=False, jpeg_sigma=source_sigma)
         shape = sample.tampered.shape[:2]
         regions = []
         for region in result.coherent_regions:
             footprint = localize_region(region.matches, shape, largest_component=False).mask
+            if sample.donor is None:
+                footprint |= _target_footprint(region, shape)
             inside = (footprint & sample.mask).sum() / max(footprint.sum(), 1)
             regions.append(RegionRecord(float(region.log10_nfa), bool(inside >= HIT_OVERLAP)))
         records.append(SampleRecord(
@@ -73,6 +79,27 @@ def score_samples(samples: Sequence, config=None) -> List[SampleRecord]:
             seconds=time.perf_counter() - start,
         ))
     return records
+
+
+def _jpeg_sigmas(sample):
+    """JPEG rounding error of (tampered, donor), from the files or the generator's quality."""
+    from spade.jpeg import quantization_sigma, quantization_sigma_for_quality
+
+    params = sample.params or {}
+    if "tampered_path" in params:
+        source = quantization_sigma(params["tampered_path"]) or 0.0
+        donor = (quantization_sigma(params["donor_path"]) or 0.0) if "donor_path" in params else 0.0
+        return source, donor
+    quality = params.get("jpeg_quality")
+    return (quantization_sigma_for_quality(quality) if quality else 0.0), 0.0
+
+
+def _target_footprint(region, shape) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    for m in region.matches:
+        x, y = m.target_coord
+        mask[y:y + m.patch_size, x:x + m.patch_size] = True
+    return mask
 
 
 def calibration_table(records: Sequence[SampleRecord], epsilons=EPSILONS) -> List[Dict[str, float]]:

@@ -126,6 +126,38 @@ config = Config(
 engine = ForensicsEngine(config)
 ```
 
+#### Copy-Move Within One Image
+
+```python
+result = engine.match_self(load_image("questioned.jpg"))
+for region in result.significant_regions:
+    print(region.source_bbox, "duplicated at", region.target_bbox, region.log10_nfa)
+```
+
+The image is matched against itself, ignoring offsets shorter than twice the
+patch size. Each duplicated pair is reported once; `localization` covers both
+copies. Repetitive content (brick, lattices, grass) really does repeat and can
+be reported as duplicated - check the region before concluding.
+
+#### JPEG-Aware Noise
+
+A JPEG file's quantization tables say how much rounding error to expect. The
+CLI and API read them automatically; from Python pass them yourself:
+
+```python
+from spade.jpeg import quantization_sigma
+
+engine.index_target(load_image(path), path, image_path=path)   # read from the file
+result = engine.match(image, jpeg_sigma=quantization_sigma("questioned.jpg") or 0.0)
+```
+
+#### Rotated Copies (experimental)
+
+`Config(rotation_invariant=True)` describes every patch in its own orientation
+and groups matches by rotation + translation. It finds rotated copies and
+recovers the angle, but is much slower and on our photo benchmark catches
+about half of the copies rotated by arbitrary angles, so it's off by default.
+
 #### Multi-Scale Matching
 
 Targets can be indexed at several scales so a copy that was shrunk before

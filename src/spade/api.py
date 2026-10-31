@@ -4,7 +4,7 @@ import io
 import base64
 import threading
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import numpy as np
 from PIL import Image
 
@@ -18,6 +18,7 @@ except ImportError:
 
 from spade import ForensicsEngine, Config, __version__
 from spade.exceptions import DependencyError, TargetExistsError
+from spade.jpeg import sigma_from_tables
 
 # Security limits
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -75,7 +76,7 @@ class IndexResponse(BaseModel):
     message: str
 
 
-async def validate_uploaded_image(file: UploadFile) -> np.ndarray:
+async def validate_uploaded_image(file: UploadFile) -> Tuple[np.ndarray, float]:
     """
     Validate and load uploaded image with security checks.
 
@@ -83,7 +84,7 @@ async def validate_uploaded_image(file: UploadFile) -> np.ndarray:
         file: Uploaded file
 
     Returns:
-        Image as numpy array
+        (image as numpy array, JPEG rounding-error std from its quantization tables; 0 if not JPEG)
 
     Raises:
         HTTPException: If validation fails
@@ -115,8 +116,9 @@ async def validate_uploaded_image(file: UploadFile) -> np.ndarray:
             )
 
         # Convert to RGB
+        jpeg_sigma = (sigma_from_tables(getattr(image, "quantization", None)) or 0.0) if image.format == "JPEG" else 0.0
         image_rgb = image.convert("RGB")
-        return np.array(image_rgb)
+        return np.array(image_rgb), jpeg_sigma
 
     except HTTPException:
         raise
@@ -279,7 +281,7 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
         Maximum file size: 50MB. Supported formats: JPEG, PNG, BMP, TIFF, WEBP.
         """
         # Validate image
-        image_array = await validate_uploaded_image(file)
+        image_array, jpeg_sigma = await validate_uploaded_image(file)
 
         # Sanitize and validate image_id
         if image_id is not None:
@@ -292,7 +294,9 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             image_id = f"img_{uuid.uuid4().hex[:12]}"
 
         try:
-            count = await run_in_threadpool(locked, engine.index_target, image_array, image_id)
+            count = await run_in_threadpool(
+                locked, engine.index_target, image_array, image_id, jpeg_sigma=jpeg_sigma
+            )
         except TargetExistsError:
             raise HTTPException(
                 status_code=409,
@@ -321,7 +325,7 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
         Maximum file size: 50MB. Supported formats: JPEG, PNG, BMP, TIFF, WEBP.
         """
         # Validate image
-        image_array = await validate_uploaded_image(file)
+        image_array, jpeg_sigma = await validate_uploaded_image(file)
 
         try:
 
@@ -334,6 +338,7 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
                 locked,
                 engine.match,
                 image_array,
+                jpeg_sigma=jpeg_sigma,
                 target_ids=target_id_list,
                 return_heatmap=return_heatmap,
             )

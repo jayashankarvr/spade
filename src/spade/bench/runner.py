@@ -103,21 +103,29 @@ def _format_table(results: Dict[str, Dict]) -> str:
 
 
 def _dataset_kwargs(args) -> Dict:
+    copy_move = args.task == "copymove"
     if args.dataset == "synthetic":
         return dict(n=args.n, negatives=args.negatives, image_size=args.image_size,
                     fragment_size=args.fragment_size, color_grade_strength=args.grade,
-                    jpeg_quality=args.jpeg, seed=args.seed)
+                    jpeg_quality=args.jpeg, seed=args.seed, tone_curve_strength=args.curve,
+                    copy_move=copy_move)
     if args.dataset == "photos":
+        geometry = dict(rotation=args.rotation, flip=args.flip)
+        if copy_move:
+            return dict(n=args.n, negatives=args.negatives, color_grade_strength=args.grade,
+                        jpeg_quality=args.jpeg, seed=args.seed, copy_move=True, **geometry)
         return dict(n=args.n, negatives=args.negatives, color_grade_strength=args.grade,
-                    jpeg_quality=args.jpeg, seed=args.seed)
+                    jpeg_quality=args.jpeg, seed=args.seed, tone_curve_strength=args.curve, **geometry)
     if args.dataset == "casia2":
-        return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed)
+        return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed, copy_move=copy_move)
     return dict(path=args.root)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="SPADE benchmark runner")
     p.add_argument("--dataset", default="synthetic", choices=["synthetic", "photos", "casia2", "manifest"])
+    p.add_argument("--task", default="splice", choices=["splice", "copymove"],
+                   help="splice: donor image given; copymove: find duplicates within one image")
     p.add_argument("--root", default=None, help="casia2 folder or manifest CSV path")
     p.add_argument("--n", type=int, default=40, help="number of positive (spliced) samples")
     p.add_argument("--negatives", type=int, default=20, help="number of negative (unrelated) pairs")
@@ -125,6 +133,9 @@ def main(argv=None):
     p.add_argument("--fragment-size", type=int, default=24, help="synthetic only")
     p.add_argument("--grade", type=float, default=0.15, help="color-grade strength (generated datasets)")
     p.add_argument("--jpeg", type=int, default=None, help="JPEG quality for the tampered image (generated datasets)")
+    p.add_argument("--curve", type=float, default=0.0, help="tone-curve (per-channel gamma) strength (generated datasets)")
+    p.add_argument("--rotation", type=float, default=0.0, help="max rotation of the copied fragment, degrees (photos)")
+    p.add_argument("--flip", action="store_true", help="mirror half the copied fragments (photos)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--calibrate", action="store_true", help="also report false regions per pair vs NFA threshold")
     p.add_argument("--no-baselines", action="store_true", help="skip the RootSIFT baseline")
@@ -136,10 +147,10 @@ def main(argv=None):
 
     records = calibration.score_samples(samples)
     results = {"spade": calibration.summary(records)}
-    if not args.no_baselines:
+    if not args.no_baselines and args.task == "splice":
         results["rootsift+ransac"] = evaluate(RootSiftRansacDetector(), positives, negatives)
 
-    print(f"\nSPADE benchmark | {args.dataset} | {len(positives)} pos + {len(negatives)} neg | "
+    print(f"\nSPADE benchmark | {args.dataset} {args.task} | {len(positives)} pos + {len(negatives)} neg | "
           f"grade={args.grade} jpeg={args.jpeg}\n")
     print(_format_table(results))
 

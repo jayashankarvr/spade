@@ -130,3 +130,19 @@ def test_runner_end_to_end(tmp_path):
     report = runner_main(["--n", "2", "--negatives", "1", "--calibrate", "--no-baselines", "--json", str(out)])
     assert out.exists() and report["calibration"]
     assert report["results"]["spade"]["iou"] > 0.5
+
+
+class TestGeometricVariants:
+    def test_rotated_and_mirrored_fragments(self):
+        pytest.importorskip("skimage")
+        samples = load("photos", n=6, crop_size=96, fragment_size=24, rotation=180, flip=True, seed=1)
+        angles = [s.params["angle"] for s in samples]
+        assert any(abs(a) > 10 for a in angles)
+        assert any(s.params["mirrored"] for s in samples)
+
+    def test_copy_move_samples(self):
+        pytest.importorskip("skimage")
+        samples = load("photos", copy_move=True, n=2, negatives=1, crop_size=96, fragment_size=24)
+        assert [s.label for s in samples] == [1, 1, 0]
+        assert all(s.donor is None for s in samples)
+        assert samples[0].mask.sum() == 2 * 24 * 24
