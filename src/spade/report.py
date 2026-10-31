@@ -41,6 +41,7 @@ _REPORTED_CONFIG_FIELDS = (
     "stride",
     "entropy_threshold",
     "k_neighbors",
+    "descriptor",
     "distance_threshold",
     "min_probability",
     "noise_sigma",

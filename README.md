@@ -175,6 +175,15 @@ and groups matches by rotation + translation. It finds rotated copies and
 recovers the angle, but is much slower and on our photo benchmark catches
 about half of the copies rotated by arbitrary angles, so it's off by default.
 
+#### Learned Descriptor
+
+`Config(descriptor="learned")` projects the luminance pattern onto 8
+directions fitted to ignore color grades and JPEG (a closed-form, LDA-style
+fit; no learning framework at run time, weights ship with the package for 4,
+5, 6 and 8 px patches). On held-out photos with JPEG 70-90, recall at 0.1%
+false matches goes from 0.64 to 0.75 at 5x5 and from 0.72 to 0.90 at 6x6.
+Refit with `python -m spade.bench.train_descriptor --sizes 5`.
+
 #### Large Collections
 
 `Config(seed_stride=4)` indexes only every 4th target position per axis (1/16

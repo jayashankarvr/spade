@@ -82,6 +82,9 @@ Issues = "https://github.com/jayashankarvr/spade/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"spade.descriptors" = ["data/*.npz"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

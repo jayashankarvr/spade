@@ -70,6 +70,9 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - **Seed index**: `Config(seed_stride=N)` indexes every N-th target position and extends found regions densely against the stored pixels, with a chance rate measured at random control offsets.
 - Targets now store their pixels (uint8, per pyramid level) instead of a float32 patch per position: about 100x less memory per indexed image.
 - Copy-move's ratio test vectorized (about 3x faster `match_self`).
+- **Learned descriptor**: `Config(descriptor="learned")` - the luminance pattern projected to 8 dimensions by a closed-form fit (generalized eigenvectors of pattern covariance vs. edit-induced covariance). Held-out photos, JPEG 70-90, recall at 0.1% false matches: 0.64 -> 0.75 (5x5), 0.72 -> 0.90 (6x6). `python -m spade.bench.train_descriptor` refits; `distance_threshold` now defaults to the descriptor's own.
+- Saved bundles now refuse overrides of `seed_stride`, `rotation_invariant` and `descriptor` on load (they shape the stored index).
+- Donor-free tampering cues (TruFor, Noiseprint++) not integrated: their licence forbids profit-oriented use and their weights host was unreachable, so nothing could be tested.
 
 ### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.

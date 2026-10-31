@@ -12,6 +12,9 @@ include pyproject.toml
 include requirements.txt
 include .pre-commit-config.yaml
 
+# Fitted descriptor weights
+recursive-include src/spade/descriptors/data *.npz
+
 # Include examples
 recursive-include examples *.py
 
