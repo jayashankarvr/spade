@@ -173,8 +173,12 @@ search time; `Config(flip_invariant=False)` turns it off.
 
 `Config(rotation_invariant=True)` describes every patch in its own orientation
 and groups matches by rotation + translation. It finds rotated copies and
-recovers the angle, but is much slower and on our photo benchmark catches
-about half of the copies rotated by arbitrary angles, so it's off by default.
+recovers the angle, but on our photo benchmark it catches about two thirds of
+copies rotated by arbitrary angles and takes 5-30 s per image, so it's off by
+default. The limit is the per-patch orientation estimate: on a 5x5 patch it
+scatters by +-20-50 degrees, and neither a wider orientation window (it runs
+past small fragments into host pixels) nor a wider angle tolerance (more
+chance agreement than true matches) helped.
 
 #### Large Collections
 

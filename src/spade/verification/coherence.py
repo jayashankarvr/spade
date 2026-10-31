@@ -136,7 +136,7 @@ def find_rigid_regions(
     offset_tolerance: int = 2,
     min_cluster_size: int = 3,
     angle_tolerance: float = np.radians(15),
-    seeds: int = 200,
+    seeds: int = 64,
     max_regions: int = 100,
 ) -> List[CoherentRegion]:
     """Group matches that agree on one rotation + translation (rotation-invariant mode).
@@ -175,7 +175,8 @@ def find_rigid_regions(
 
         def agreeing(seed: int, theta: float, shift: np.ndarray, slack: float) -> np.ndarray:
             lo, hi = np.searchsorted(ext_rot, [theta - angle_tolerance, theta + angle_tolerance + 1e-12])
-            cand = np.unique(ext_idx[lo:hi])
+            # A window narrower than a full turn never visits a match twice.
+            cand = ext_idx[lo:hi]
             cand = cand[alive[cand]]
             pred = _rotate(src[cand], theta) + shift
             return cand[np.abs(pred - tgt[cand]).max(axis=1) <= slack]
