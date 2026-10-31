@@ -67,11 +67,11 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - **Mirrored copies**: `Config(flip_invariant=True)` searches the mirrored query too (`Match.mirrored`, `CoherentRegion.mirrored`). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged.
 - **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
 - **Provenance graph**: `spade.provenance.build_provenance` and `spade provenance DIR [--copy-moves] [--json] [--dot]` - which images share regions, under FDR control across the collection. Links are undirected on purpose.
-- **Seed index**: `Config(seed_stride=N)` indexes every N-th target position and extends found regions densely against the stored pixels, with a chance rate measured at random control offsets.
+- **Seed index (experimental, not calibrated)**: `Config(seed_stride=N)` indexes every N-th target position and extends found regions densely against the stored pixels, with a chance rate measured at random control offsets. On real photos at JPEG 90 that chance rate is far too low (11 false regions per pair at NFA < 1e-3); off by default and documented as unsafe.
 - Targets now store their pixels (uint8, per pyramid level) instead of a float32 patch per position: about 100x less memory per indexed image.
 - Copy-move's ratio test vectorized (about 3x faster `match_self`).
-- **Learned descriptor**: `Config(descriptor="learned")` - the luminance pattern projected to 8 dimensions by a closed-form fit (generalized eigenvectors of pattern covariance vs. edit-induced covariance). Held-out photos, JPEG 70-90, recall at 0.1% false matches: 0.64 -> 0.75 (5x5), 0.72 -> 0.90 (6x6). `python -m spade.bench.train_descriptor` refits; `distance_threshold` now defaults to the descriptor's own.
-- Saved bundles now refuse overrides of `seed_stride`, `rotation_invariant` and `descriptor` on load (they shape the stored index).
+- Saved bundles now refuse overrides of `seed_stride` and `rotation_invariant` on load (they shape the stored index).
+- Tried and removed: a closed-form learned linear descriptor (LDA-style projection of the luminance pattern). It won on isolated patch pairs (recall at 0.1% false matches 0.64 -> 0.75 at 5x5) but not end to end: 8 dimensions lost recall (0.90 -> 0.825 at JPEG 75), 16 tied. Nearest-neighbour retrieval, not pair separation, is what the engine needs.
 - Donor-free tampering cues (TruFor, Noiseprint++) not integrated: their licence forbids profit-oriented use and their weights host was unreachable, so nothing could be tested.
 
 ### Added (before the rework)

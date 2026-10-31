@@ -33,7 +33,6 @@ from PIL import Image
 from spade.aggregation.heatmap import Match, SpatialAggregator
 from spade.aggregation.localize import Localization, localize_region, mask_to_bbox
 from spade.descriptors.core import LUMA, LuminanceDescriptor, luminance
-from spade.descriptors.learned import LearnedDescriptor
 from spade.exceptions import (
     ConfigurationError,
     ImageSizeError,
@@ -211,12 +210,9 @@ class Config:
     # the descriptor, so this is only for pruning weakly textured ones.
     entropy_threshold: Optional[float] = field(default_factory=lambda: _env_optional_float("SPADE_ENTROPY_THRESHOLD", min_val=0.0))
     k_neighbors: int = field(default_factory=lambda: _env_int("SPADE_K_NEIGHBORS", 8, min_val=1))
-    # Patch descriptor: "luminance" (normalized grey-level pattern) or "learned"
-    # (a fitted linear projection of it; see spade.descriptors.learned).
-    descriptor: str = field(default_factory=lambda: os.environ.get("SPADE_DESCRIPTOR", "luminance"))
-    # Squared L2 distance between descriptors for a candidate match. None uses
-    # the descriptor's own default (0.5 for luminance; shipped with "learned").
-    distance_threshold: Optional[float] = field(default_factory=lambda: _env_optional_float("SPADE_DISTANCE_THRESHOLD", min_val=0.0))
+    # Squared L2 distance between descriptors (normalized luminance patterns)
+    # for a candidate match.
+    distance_threshold: float = field(default_factory=lambda: _env_float("SPADE_DISTANCE_THRESHOLD", 0.5, min_val=0.0))
     # Per-patch chi-square p-value floor; the cheap pre-filter, not the decision.
     min_probability: float = field(default_factory=lambda: _env_float("SPADE_MIN_PROBABILITY", 0.01, min_val=0.0, max_val=1.0))
     noise_sigma: float = field(default_factory=lambda: _env_float("SPADE_NOISE_SIGMA", 0.02, min_val=0.0))
@@ -275,8 +271,6 @@ class Config:
                 raise ConfigurationError(f"All pyramid_scales must be > 0, got {self.pyramid_scales}")
             if 1.0 not in self.pyramid_scales:
                 raise ConfigurationError(f"pyramid_scales must include 1.0 (original scale), got {self.pyramid_scales}")
-        if self.descriptor not in ("luminance", "learned"):
-            raise ConfigurationError(f"descriptor must be 'luminance' or 'learned', got {self.descriptor!r}")
         if self.rotation_invariant and self.pyramid_enabled:
             raise ConfigurationError("rotation_invariant and pyramid_enabled can't be combined yet")
         if self.max_targets is not None and self.max_targets < 1:
@@ -361,15 +355,7 @@ class ForensicsEngine:
             stride=self.config.stride * self.config.seed_stride,
             entropy_threshold=self.config.entropy_threshold,
         )
-        if self.config.descriptor == "learned":
-            self.descriptor = LearnedDescriptor(self.config.patch_size)
-            default_threshold = self.descriptor.distance_threshold
-        else:
-            self.descriptor = LuminanceDescriptor(self.config.patch_size)
-            default_threshold = 0.5
-        self.distance_threshold = (
-            self.config.distance_threshold if self.config.distance_threshold is not None else default_threshold
-        )
+        self.descriptor = LuminanceDescriptor(self.config.patch_size)
         self.index = ANNIndex(dim=self.descriptor.dim)
         self.verifier = AffineVerifier(noise_sigma=self.config.noise_sigma)
         self.aggregator = SpatialAggregator(smoothing_sigma=self.config.smoothing_sigma)
@@ -677,7 +663,7 @@ class ForensicsEngine:
             # its slightly shifted copies; ask for more so real duplicates survive.
             k = 4 * k
         hits = self.index.search(descriptors, k)
-        valid = (hits.owner >= 0) & (hits.distances <= self.distance_threshold)
+        valid = (hits.owner >= 0) & (hits.distances <= self.config.distance_threshold)
         if target_ids is not None:
             wanted = set(target_ids)
             allowed = np.array([i in wanted for i in hits.image_ids] + [False])
@@ -1004,7 +990,7 @@ class ForensicsEngine:
 
         frozen = {
             "patch_size", "stride", "entropy_threshold", "pyramid_enabled", "pyramid_scales", "pyramid_min_size",
-            "descriptor", "seed_stride", "rotation_invariant",
+            "seed_stride", "rotation_invariant",
         }
         overrides = {k: v for k, v in config_overrides.items() if k not in frozen}
         engine = cls(Config.from_dict(state["config"], **overrides))
