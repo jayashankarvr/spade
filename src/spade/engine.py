@@ -52,6 +52,7 @@ from spade.verification.coherence import (
     SpatialCoherenceVerifier,
     find_rigid_regions,
     make_region,
+    match_offset,
 )
 from spade.verification.nfa import log10_nfa, overlap_factor
 from spade.verification.probability import ProbabilityModel
@@ -712,6 +713,8 @@ class ForensicsEngine:
             if cfg.rotation_invariant:
                 # A chance match must also agree on the angle.
                 p *= _ANGLE_TOLERANCE / np.pi
+            if self._self_min_offset is not None:
+                p = max(p, self._competing_offset_rate(candidates, np.nonzero(in_box)[0], cluster))
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
             region.n_tests = n_tests
@@ -719,6 +722,37 @@ class ForensicsEngine:
 
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
         return regions
+
+    def _competing_offset_rate(self, candidates, box: np.ndarray, cluster) -> float:
+        """Share of the region's patches that also agree on the best *other* offset.
+
+        Within one image, texture repeats: brick, lattices, grass match
+        themselves at several offsets, and a region test using the image-wide
+        chance rate calls that a copy. A copy-move gives one dominant offset.
+        So the chance rate for a region is at least the support its own patches
+        give some competing offset (outside a small neighbourhood of its own),
+        a region-level version of Lowe's ratio test. Only used for self-matching:
+        it cut false regions on real photos ~100x there, while for two-image
+        searches it cost recall and bought nothing.
+        """
+        if len(box) == 0:
+            return 0.0
+        tol = self.config.coherence_offset_tolerance
+        rows = np.nonzero(np.isin(candidates.src_idx, box))[0]
+        rows = [i for i in rows if candidates.matches[i].image_id == cluster.image_id]
+        if not rows:
+            return 0.0
+        offsets = np.array([match_offset(candidates.matches[i]) for i in rows], dtype=np.int64)
+        sources = candidates.src_idx[rows]
+        far = np.abs(offsets - np.array(cluster.offset)).max(axis=1) > tol + 3
+        if not far.any():
+            return 0.0
+        cell = 2 * tol + 1
+        keys = (offsets[far, 0] // cell) * 1_000_003 + (offsets[far, 1] // cell)
+        # Count each source patch once per offset cell.
+        pairs = np.unique(np.stack([keys, sources[far]], axis=1), axis=0)
+        _, support = np.unique(pairs[:, 0], return_counts=True)
+        return min(1.0, support.max() / len(box))
 
     def _fit_region_transform(
         self, src: np.ndarray, tgt: np.ndarray, usable: np.ndarray

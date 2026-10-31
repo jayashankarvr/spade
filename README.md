@@ -136,8 +136,12 @@ for region in result.significant_regions:
 
 The image is matched against itself, ignoring offsets shorter than twice the
 patch size. Each duplicated pair is reported once; `localization` covers both
-copies. Repetitive content (brick, lattices, grass) really does repeat and can
-be reported as duplicated - check the region before concluding.
+copies. Repetitive texture (brick, gravel, lattices) matches itself at many
+offsets, so a region only counts when its offset clearly beats every other
+offset its patches support - a region-level ratio test. On real-photo
+copy-moves at JPEG 90 that keeps false regions at about 0.02 per image, at the
+cost of finding about half of the copies; content that is pixel-identical by
+construction (an exact tiling) is still reported, because it is a duplicate.
 
 #### JPEG-Aware Noise
 

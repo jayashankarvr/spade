@@ -31,6 +31,17 @@ class TestCopyMove:
         result = ForensicsEngine().match_self(make_negative_pair(seed=201).tampered)
         assert not result.significant_regions
 
+    def test_repetitive_texture_is_not_a_copy(self):
+        # Brick and gravel match themselves at many offsets; with no single
+        # offset standing out, nothing should be reported as duplicated.
+        pytest.importorskip("skimage")
+        from spade.bench.datasets import load_photos
+
+        photos = load_photos()
+        for name in ("brick", "gravel"):
+            crop = np.ascontiguousarray(photos[name][40:200, 40:200])
+            assert not ForensicsEngine().match_self(crop).significant_regions
+
     def test_does_not_touch_engine_index(self):
         engine = ForensicsEngine()
         engine.match_self(make_copy_move(seed=1).tampered)
