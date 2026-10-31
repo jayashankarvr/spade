@@ -130,3 +130,32 @@ class TestTargetStorage:
         engine.index_target(image, "a")
         target = engine._targets["a"]
         assert target.levels[1.0].dtype == np.uint8 and np.array_equal(target.levels[1.0], image)
+
+
+class TestQueryScales:
+    def test_enlarged_copy_needs_query_scales(self):
+        from PIL import Image
+
+        from spade.bench.synthetic import _textured_image
+
+        rng = np.random.RandomState(4)
+        donor, host = _textured_image(rng, 128, 128), _textured_image(rng, 128, 128)
+        fragment = np.asarray(Image.fromarray(donor[40:72, 40:72]).resize((48, 48), Image.BICUBIC))
+        tampered = host.copy()
+        tampered[60:108, 20:68] = fragment
+        mask = np.zeros((128, 128), bool)
+        mask[60:108, 20:68] = True
+
+        plain = ForensicsEngine(Config(flip_invariant=False))
+        plain.index_target(donor, "d")
+        assert _iou(plain.match(tampered).localization.mask, mask) < 0.2
+
+        scaled = ForensicsEngine(Config(flip_invariant=False, query_scales=[1.0, 0.75, 0.5]))
+        scaled.index_target(donor, "d")
+        result = scaled.match(tampered)
+        assert result.significant_regions and result.significant_regions[0].source_scale < 1.0
+        assert _iou(result.localization.mask, mask) > 0.5
+
+    def test_query_scales_validated(self):
+        with pytest.raises(ValueError, match="query_scales"):
+            Config(query_scales=[0.5])

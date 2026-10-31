@@ -28,6 +28,8 @@ class CoherentRegion:
     rotation: float = 0.0
     # The source side is a horizontal mirror image of the target side.
     mirrored: bool = False
+    # Scale the source was searched at (1.0 unless query_scales found it).
+    source_scale: float = 1.0
     # Region hypotheses tried in the search that produced this region; NFA is
     # n_tests times the region's own p-value (used for FDR across searches).
     n_tests: Optional[float] = None

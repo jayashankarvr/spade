@@ -235,6 +235,9 @@ class Config:
     # Also search the mirrored source, so horizontally flipped copies are found
     # (vertical flips too, together with rotation_invariant).
     flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", True))
+    # Also search the questioned image shrunk to these scales, for copies that
+    # were enlarged before pasting (the pyramid covers shrunk ones).
+    query_scales: List[float] = field(default_factory=lambda: [1.0])
     # Multi-scale pyramid (targets only)
     pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", False))
     pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])
@@ -275,6 +278,8 @@ class Config:
                 raise ConfigurationError(f"pyramid_scales must include 1.0 (original scale), got {self.pyramid_scales}")
         if self.index_type not in ("flat", "ivfpq"):
             raise ConfigurationError(f"index_type must be 'flat' or 'ivfpq', got {self.index_type!r}")
+        if not self.query_scales or not all(0 < q <= 1 for q in self.query_scales) or 1.0 not in self.query_scales:
+            raise ConfigurationError(f"query_scales must be in (0, 1] and include 1.0, got {self.query_scales}")
         if self.rotation_invariant and self.pyramid_enabled:
             raise ConfigurationError("rotation_invariant and pyramid_enabled can't be combined yet")
         if self.max_targets is not None and self.max_targets < 1:
@@ -509,12 +514,23 @@ class ForensicsEngine:
             use ``significant_regions`` for the ones with NFA < max_nfa.
         """
         source_image = self._normalize_image(source_image)
-        result = self._match_once(source_image, target_ids, return_heatmap, jpeg_sigma)
-        if not self.config.flip_invariant:
-            return result
-        mirrored = self._match_once(np.ascontiguousarray(source_image[:, ::-1]), target_ids, return_heatmap,
-                                    jpeg_sigma, mirror_width=source_image.shape[1])
-        return self._merge_mirrored(result, mirrored, source_image.shape[:2], return_heatmap)
+        h, w = source_image.shape[:2]
+        scales = [1.0] if self._self_min_offset is not None else sorted(set(self.config.query_scales), reverse=True)
+        passes = []
+        for scale in scales:
+            image = source_image if scale == 1.0 else _resize(source_image, scale)
+            if min(image.shape[:2]) < self.config.patch_size:
+                continue
+            for mirrored in ([False, True] if self.config.flip_invariant else [False]):
+                query = np.ascontiguousarray(image[:, ::-1]) if mirrored else image
+                result = self._match_once(query, target_ids, return_heatmap, jpeg_sigma,
+                                          mirror_width=image.shape[1] if mirrored else None)
+                passes.append((result, scale, mirrored, image.shape[1]))
+        if not passes:  # smaller than one patch: the plain pass returns the empty result
+            return self._match_once(source_image, target_ids, return_heatmap, jpeg_sigma)
+        if len(passes) == 1:
+            return passes[0][0]
+        return self._merge_passes(passes, (h, w), return_heatmap)
 
     def _match_once(self, source_image, target_ids, return_heatmap, jpeg_sigma, mirror_width=None) -> MatchResult:
         """One search pass. ``mirror_width``: the source was mirrored about an image this wide."""
@@ -567,27 +583,35 @@ class ForensicsEngine:
             localization=localization,
         )
 
-    def _merge_mirrored(self, plain: MatchResult, mirrored: MatchResult, shape, return_heatmap) -> MatchResult:
-        """Bring a mirrored-query pass back to original coordinates and combine it with the plain one.
+    def _merge_passes(self, passes, shape, return_heatmap) -> MatchResult:
+        """Bring every query pass (rescaled and/or mirrored) back to original coordinates and combine.
 
-        Both passes are hypotheses of the same search, so every region's NFA
-        doubles (log10 2 added) and so does the test count.
+        All passes are hypotheses of one search, so every region's NFA and the
+        test count are multiplied by the number of passes.
         """
         h, w = shape
         size = self.config.patch_size
-        for m in mirrored.matches:
-            m.source_coord = (w - size - m.source_coord[0], m.source_coord[1])
-            m.mirrored = True
-        for region in mirrored.coherent_regions:
-            x, y, bw, bh = region.source_bbox
-            region.source_bbox = (w - x - bw, y, bw, bh)
-            region.mirrored = True
-        regions = plain.coherent_regions + mirrored.coherent_regions
-        for region in regions:
-            region.log10_nfa += float(np.log10(2.0))
-            region.n_tests *= 2.0
+        n_passes = float(len(passes))
+        regions, matches = [], []
+        for result, scale, mirrored, pass_width in passes:
+            for m in result.matches:
+                x, y = m.source_coord
+                if mirrored:
+                    x = pass_width - size - x
+                m.source_coord = (int(round(x / scale)), int(round(y / scale)))
+                m.source_scale, m.mirrored = scale, mirrored
+            for region in result.coherent_regions:
+                x, y, bw, bh = region.source_bbox
+                if mirrored:
+                    x = pass_width - x - bw
+                region.source_bbox = (int(round(x / scale)), int(round(y / scale)),
+                                      int(round(bw / scale)), int(round(bh / scale)))
+                region.mirrored, region.source_scale = mirrored, scale
+                region.log10_nfa += float(np.log10(n_passes))
+                region.n_tests *= n_passes
+            regions.extend(result.coherent_regions)
+            matches.extend(result.matches)
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
-        matches = plain.matches + mirrored.matches
 
         best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else (
             max(matches, key=lambda m: m.probability) if matches else None
@@ -596,8 +620,9 @@ class ForensicsEngine:
         if return_heatmap and regions:
             heatmap = self.aggregator.aggregate(regions[0].matches, self._targets[regions[0].image_id].shape)
         significant = [m for r in regions if r.significant for m in r.matches]
+        plain = passes[0][0]
         stats = self._stats(plain.stats["source_patches"], len(matches), regions)
-        stats["n_tests"] = 2.0 * plain.stats.get("n_tests", 0.0)
+        stats["n_tests"] = n_passes * plain.stats.get("n_tests", 0.0)
         return MatchResult(
             matches=matches,
             best_match=best_match,
@@ -983,6 +1008,14 @@ class ForensicsEngine:
     def has_target(self, image_id: str) -> bool:
         """Check if target is indexed."""
         return image_id in self._targets
+
+
+def _resize(image: np.ndarray, scale: float) -> np.ndarray:
+    """Float [0, 1] RGB image resized by ``scale`` (area-averaging when shrinking)."""
+    h, w = image.shape[:2]
+    size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    resized = Image.fromarray(_to_uint8(image)).resize(size, Image.BOX if scale < 1 else Image.BICUBIC)
+    return np.asarray(resized).astype(np.float32) / 255.0
 
 
 def _to_uint8(image: np.ndarray) -> np.ndarray:

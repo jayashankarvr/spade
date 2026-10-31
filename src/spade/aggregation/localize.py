@@ -20,7 +20,7 @@ def match_footprint_mask(matches: Sequence, shape: Tuple[int, int]) -> np.ndarra
     mask = np.zeros((h, w), dtype=bool)
     for m in matches:
         x, y = int(m.source_coord[0]), int(m.source_coord[1])
-        ps = int(m.patch_size)
+        ps = int(round(m.patch_size / getattr(m, "source_scale", 1.0)))
         mask[max(0, y):min(h, y + ps), max(0, x):min(w, x + ps)] = True
     return mask
 

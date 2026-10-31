@@ -25,6 +25,9 @@ class Match:
     rotation: float = 0.0
     # Found by searching the horizontally mirrored source (flip-invariant mode).
     mirrored: bool = False
+    # Scale the source was searched at (query_scales); its footprint in the
+    # original source is patch_size / source_scale.
+    source_scale: float = 1.0
 
 
 class SpatialAggregator:
