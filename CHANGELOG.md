@@ -65,6 +65,7 @@ This release reworks the matching pipeline. On the synthetic benchmark
 
 ### Added (collections and review)
 - **Mirrored copies, on by default**: the mirrored query is searched too (`Match.mirrored`, `CoherentRegion.mirrored`; `Config(flip_invariant=False)` to disable). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged; copy-move on real photos: no extra false alarms. Doubles search time.
+- **Donor pyramid on by default**, at scales 1, 0.75 and 0.5 (was off, at 1/0.5/0.25/0.125). CASIA v2, 60 + 60 pairs: IoU 0.27 -> 0.37, recall 0.29 -> 0.39, AUC 0.72 -> 0.77, false regions unchanged, +17% time. `spade serve` no longer forces it off unless `--no-pyramid` is given.
 - `Config.query_scales`: also search the questioned image shrunk, for copies that were enlarged before pasting (`Match.source_scale`). Off by default: on 14 resized CASIA v2 splices it found 5 instead of 4 at 1.7x the time.
 - **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
 - **Provenance graph**: `spade.provenance.build_provenance` and `spade provenance DIR [--copy-moves] [--json] [--dot]` - which images share regions, under FDR control across the collection. Links are undirected on purpose.

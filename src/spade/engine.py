@@ -239,8 +239,8 @@ class Config:
     # were enlarged before pasting (the pyramid covers shrunk ones).
     query_scales: List[float] = field(default_factory=lambda: [1.0])
     # Multi-scale pyramid (targets only)
-    pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", False))
-    pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])
+    pyramid_enabled: bool = field(default_factory=lambda: _env_bool("SPADE_PYRAMID_ENABLED", True))
+    pyramid_scales: List[float] = field(default_factory=lambda: [1.0, 0.75, 0.5])
     pyramid_min_size: int = field(default_factory=lambda: _env_int("SPADE_PYRAMID_MIN_SIZE", 16, min_val=3))
     # Memory management: least recently indexed targets are evicted past this.
     max_targets: Optional[int] = field(default_factory=lambda: _env_int("SPADE_MAX_TARGETS", 1000, min_val=1) if os.environ.get("SPADE_MAX_TARGETS") else None)

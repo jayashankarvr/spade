@@ -149,7 +149,7 @@ Comprehensive health check with detailed metrics.
   },
   "config": {
     "patch_size": 5,
-    "pyramid_enabled": false,
+    "pyramid_enabled": true,
     "coherence_enabled": true
   },
   "memory": {
@@ -182,7 +182,7 @@ Get current engine configuration.
   "distance_threshold": 0.5,
   "min_probability": 0.01,
   "max_nfa": 1.0,
-  "pyramid_enabled": false,
+  "pyramid_enabled": true,
   "coherence_enabled": true
 }
 ```

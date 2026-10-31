@@ -126,7 +126,7 @@ config = Config(
     stride=2,                # skip positions for speed
     noise_sigma=0.03,        # expected noise; raise for heavily compressed images
     max_nfa=0.01,            # stricter significance
-    pyramid_enabled=True,    # also index targets at 1/2, 1/4, 1/8 scale
+    pyramid_enabled=False,   # index targets at full size only (faster)
     max_targets=100,         # evict least recently indexed targets past this
 )
 engine = ForensicsEngine(config)
@@ -196,12 +196,14 @@ which is most of the memory regardless of the index.
 
 #### Multi-Scale Matching
 
-Targets can be indexed at several scales so a copy that was shrunk before
-pasting is still found. Matches record the level they came from in
-`target_scale`.
+Targets are indexed at full, 3/4 and 1/2 size by default, so a copy that was
+shrunk before pasting is still found. Matches record the level they came from
+in `target_scale`. On 60 spliced + 60 unrelated CASIA v2 pairs this took IoU
+from 0.27 to 0.37 and recall from 0.29 to 0.39 with no extra false regions
+(1 in 120 pairs either way), for about 17% more time per image.
 
 ```python
-config = Config(pyramid_enabled=True, pyramid_scales=[1.0, 0.5, 0.25])
+config = Config(pyramid_scales=[1.0, 0.5, 0.25])   # or pyramid_enabled=False
 engine = ForensicsEngine(config)
 ```
 
@@ -253,7 +255,6 @@ docker-compose up
 
 # Or with custom config via environment variables
 export SPADE_PATCH_SIZE=4
-export SPADE_PYRAMID_ENABLED=true
 export SPADE_MAX_TARGETS=200
 python -m spade serve
 ```
@@ -307,7 +308,7 @@ export SPADE_MIN_PROBABILITY=0.01     # Per-patch fit p-value floor
 export SPADE_NOISE_SIGMA=0.02         # Expected noise (0-1 scale)
 export SPADE_MAX_NFA=1.0              # Significance threshold for regions
 export SPADE_ENTROPY_THRESHOLD=       # Optional texture floor in bits (unset = off)
-export SPADE_PYRAMID_ENABLED=true     # Index targets at several scales
+export SPADE_PYRAMID_ENABLED=false    # Index targets at full size only
 export SPADE_MAX_TARGETS=1000         # Evict least recently indexed targets
 ```
 

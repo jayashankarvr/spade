@@ -346,12 +346,12 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8000, help="Port to listen on")
 @click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
-@click.option("--pyramid/--no-pyramid", default=False, help="Enable multi-scale pyramid")
+@click.option("--pyramid/--no-pyramid", default=None, help="Index targets at several scales (default: on)")
 def serve(
     host: str,
     port: int,
     patch_size: Optional[int],
-    pyramid: bool,
+    pyramid: Optional[bool],
 ):
     """Start the REST API server."""
     try:
@@ -361,14 +361,16 @@ def serve(
             "FastAPI required for API server: pip install spade-forensics[api]"
         )
 
-    overrides = {"pyramid_enabled": pyramid}
+    overrides = {}
+    if pyramid is not None:
+        overrides["pyramid_enabled"] = pyramid
     if patch_size is not None:
         overrides["patch_size"] = patch_size
     config = Config(**overrides)
 
     click.echo(f"Starting SPADE API server on {host}:{port}")
     click.echo(f"  Patch size: {config.patch_size}")
-    click.echo(f"  Pyramid: {'enabled' if pyramid else 'disabled'}")
+    click.echo(f"  Pyramid: {'enabled' if config.pyramid_enabled else 'disabled'}")
     click.echo(f"\nAPI documentation: http://localhost:{port}/docs\n")
 
     run_server(host=host, port=port, config=config)
