@@ -176,16 +176,19 @@ and groups matches by rotation + translation. It finds rotated copies and
 recovers the angle, but is much slower and on our photo benchmark catches
 about half of the copies rotated by arbitrary angles, so it's off by default.
 
-#### Large Collections (experimental)
+#### Large Collections
 
-`Config(seed_stride=4)` indexes only every 4th target position per axis (1/16
-of the index) and verifies found regions densely against the target's stored
-pixels. **Not calibrated yet**: on real photos at JPEG 90 it reports about 11
-false regions per image pair, against none for the default dense index. Don't
-use it for conclusions until that's fixed.
+The index (`index_type`, default `"ivfpq"`) stores descriptors with product
+quantization in an inverted file once `ivf_train_size` patches (default
+50,000) are indexed; below that, search is exact. On 200,000 descriptors it is
+5x smaller (4.3 vs 21.6 MB) and searches 22x faster; on real-photo splices
+forced to use it, results matched the exact index (IoU 0.818, recall 0.975,
+no false regions). Only candidate generation is approximate - every
+candidate is still verified against real pixels. `index_type="flat"` keeps
+search exact at any size.
 
-Independently of that, targets keep their pixels once (uint8) instead of a
-patch per position, which is most of the memory.
+Targets keep their pixels once (uint8) rather than a patch per position,
+which is most of the memory regardless of the index.
 
 #### Multi-Scale Matching
 

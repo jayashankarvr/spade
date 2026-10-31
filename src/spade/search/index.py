@@ -1,4 +1,16 @@
-"""Exact nearest-neighbour index over patch descriptors (FAISS)."""
+"""Nearest-neighbour index over patch descriptors (FAISS).
+
+Two storage kinds, same interface:
+
+* ``flat``  - exact search, 4 bytes per descriptor value. The default.
+* ``ivfpq`` - product quantization (about one byte per 5 values) plus an
+  inverted file, so a search only visits ``nprobe`` of the cells. Needs
+  training, so vectors sit in an exact buffer until ``train_size`` of them
+  have arrived; small collections never leave that exact mode.
+
+Only candidate generation is approximate; every candidate is still verified
+against real pixels, so a lossy index can miss matches but not invent them.
+"""
 
 from __future__ import annotations
 
@@ -42,21 +54,48 @@ class SearchHits:
     image_ids: List[str]
 
 
+KINDS = ("flat", "ivfpq")
+
+
 class ANNIndex:
-    """Flat L2 index where every image owns a contiguous block of vector ids.
+    """L2 index where every image owns a contiguous block of vector ids.
 
     Ids are never reused, so removing an image is an exact ``remove_ids`` on its
     range and nothing stale is ever returned by a search.
     """
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, kind: str = "flat", train_size: int = 50_000, nprobe: int = 16):
         if faiss is None:
             raise DependencyError("faiss-cpu required: pip install faiss-cpu")
+        if kind not in KINDS:
+            raise IndexStoreError(f"index kind must be one of {KINDS}, got {kind!r}")
         self.dim = dim
+        self.kind = kind
+        self.train_size = train_size
+        self.nprobe = nprobe
         self._lock = threading.RLock()
+        self._trained = kind != "ivfpq"
         self._index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
         self._next_id = 0
         self._ranges: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()  # image_id -> (start, count)
+
+    def _train_ivfpq(self) -> None:
+        """Swap the exact buffer for a trained IVF-PQ index holding the same vectors."""
+        ids = np.concatenate([np.arange(s, s + c, dtype=np.int64) for s, c in self._ranges.values() if c])
+        vectors = self._index.reconstruct_batch(ids)
+        nlist = int(np.clip(4 * np.sqrt(len(vectors)), 16, 4096))
+        # About five descriptor values per sub-quantizer, one byte each.
+        m = max(d for d in range(1, max(2, self.dim // 4 + 1)) if self.dim % d == 0)
+        ivf = faiss.IndexIVFPQ(faiss.IndexFlatL2(self.dim), self.dim, nlist, m, 8)
+        ivf.train(vectors)
+        ivf.nprobe = self.nprobe
+        # IVF keeps our ids itself. Wrapping it in IndexIDMap2 would break
+        # deletes: the wrapper assumes the inner index renumbers after a
+        # removal, which IVF doesn't. The hash-table direct map keeps
+        # remove_ids and reconstruct working with arbitrary ids.
+        ivf.set_direct_map_type(faiss.DirectMap.Hashtable)
+        ivf.add_with_ids(vectors, ids)
+        self._index, self._trained = ivf, True
 
     # ------------------------------------------------------------------
 
@@ -73,6 +112,8 @@ class ANNIndex:
                 self._index.add_with_ids(descriptors, ids)
             self._ranges[image_id] = (self._next_id, n)
             self._next_id += n
+            if not self._trained and self._index.ntotal >= self.train_size:
+                self._train_ivfpq()
 
     def remove(self, image_id: str) -> bool:
         with self._lock:
@@ -81,7 +122,11 @@ class ANNIndex:
                 return False
             start, count = entry
             if count:
-                self._index.remove_ids(faiss.IDSelectorRange(start, start + count))
+                if self.kind == "ivfpq" and self._trained:
+                    # The IVF hash-table direct map only removes by explicit id list.
+                    self._index.remove_ids(np.arange(start, start + count, dtype=np.int64))
+                else:
+                    self._index.remove_ids(faiss.IDSelectorRange(start, start + count))
             return True
 
     def search(self, queries: np.ndarray, k: int) -> SearchHits:
@@ -145,6 +190,10 @@ class ANNIndex:
             meta = {
                 "version": _FORMAT_VERSION,
                 "dim": self.dim,
+                "kind": self.kind,
+                "trained": self._trained,
+                "train_size": self.train_size,
+                "nprobe": self.nprobe,
                 "next_id": self._next_id,
                 "targets": [[image_id, start, count] for image_id, (start, count) in self._ranges.items()],
             }
@@ -162,8 +211,12 @@ class ANNIndex:
             raise IndexStoreError(
                 f"unsupported index format {meta.get('version')!r}; re-index with this SPADE version"
             )
-        index = cls(int(meta["dim"]))
+        index = cls(int(meta["dim"]), kind=meta.get("kind", "flat"),
+                    train_size=int(meta.get("train_size", 50_000)), nprobe=int(meta.get("nprobe", 16)))
         index._index = faiss.read_index(f"{path}.index")
+        index._trained = bool(meta.get("trained", True))
+        if index.kind == "ivfpq" and index._trained:
+            faiss.extract_index_ivf(index._index).nprobe = index.nprobe
         index._next_id = int(meta["next_id"])
         index._ranges = OrderedDict((t[0], (int(t[1]), int(t[2]))) for t in meta["targets"])
         expected = sum(count for _, count in index._ranges.values())

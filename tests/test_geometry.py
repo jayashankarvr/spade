@@ -123,19 +123,7 @@ class TestMirroredCopies:
         assert flip.match(tampered).stats["n_tests"] == pytest.approx(2 * plain.match(tampered).stats["n_tests"])
 
 
-class TestSeedIndex:
-    def test_seed_index_is_smaller_and_still_finds_the_copy(self):
-        from spade.bench.synthetic import make_recolored_splice
-
-        sample = make_recolored_splice(seed=0, image_size=96, fragment_size=24)
-        dense, seeds = ForensicsEngine(), ForensicsEngine(Config(seed_stride=4))
-        for engine in (dense, seeds):
-            engine.index_target(sample.donor, "d")
-        assert seeds.index.size * 10 < dense.index.size
-        result = seeds.match(sample.tampered)
-        assert result.significant_regions
-        assert _iou(result.localization.mask, sample.mask) > 0.7
-
+class TestTargetStorage:
     def test_target_pixels_stored_once(self):
         engine = ForensicsEngine()
         image = (np.random.RandomState(0).rand(64, 64, 3) * 255).astype(np.uint8)
