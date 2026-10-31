@@ -426,6 +426,20 @@ pixel-identical, so some "false" detections there are real matches (see the
 note above). Synthetic data is a sanity check, not a substitute for a real forensic
 dataset.
 
+**CASIA v2** (real cross-image splices with their actual donor images; 60
+spliced + 60 unrelated pairs, `--dataset casia2`):
+
+| | IoU | Precision | Recall | Detection AUC | s / image |
+|---|---|---|---|---|---|
+| SPADE | 0.27 | 0.98 | 0.29 | 0.72 | 21 |
+| RootSIFT + RANSAC | 0.18 | 0.95 | 0.19 | 0.82 | 0.1 |
+
+Real splices are much harder than the generated ones: SPADE finds about a
+third of them, localizes them better than the keypoint baseline, and stays
+precise (one false region across all 120 pairs; no alarm on any unrelated pair
+below NFA 10). Many CASIA splices are resized or rotated before pasting, which
+the default configuration doesn't handle.
+
 ## Project structure
 
 ```

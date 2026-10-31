@@ -75,6 +75,10 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - Tried and removed: a closed-form learned linear descriptor (LDA-style projection of the luminance pattern). It won on isolated patch pairs (recall at 0.1% false matches 0.64 -> 0.75 at 5x5) but not end to end: 8 dimensions lost recall (0.90 -> 0.825 at JPEG 75), 16 tied. Nearest-neighbour retrieval, not pair separation, is what the engine needs.
 - Donor-free tampering cues (TruFor, Noiseprint++) not integrated: their licence forbids profit-oriented use and their weights host was unreachable, so nothing could be tested.
 
+### Measured on real data
+- **CASIA v2** cross-image splices (60 + 60 pairs): SPADE IoU 0.27, precision 0.98, recall 0.29, AUC 0.72; RootSIFT + RANSAC IoU 0.18, precision 0.95, recall 0.19, AUC 0.82. One false region across 120 pairs. Much harder than the generated benchmarks; resized/rotated splices are the likely gap.
+- Tried and not kept: a copy-move ratio test restricted to a region's own agreeing patches (photo copy-moves: recall 0.47 -> 0.37, AUC 0.96 -> 0.88).
+
 ### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
 - **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.
