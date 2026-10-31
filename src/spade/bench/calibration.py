@@ -48,13 +48,19 @@ class SampleRecord:
         return -min((r.log10_nfa for r in self.regions), default=1e9)
 
 
-def score_samples(samples: Sequence, config=None) -> List[SampleRecord]:
-    """Run SPADE once per sample (index donor, query tampered) and keep every region."""
+def score_samples(samples: Sequence, config=None, progress: bool = False) -> List[SampleRecord]:
+    """Run SPADE once per sample (index donor, query tampered) and keep every region.
+
+    ``progress`` prints a line to stderr every 10 samples (long real-data runs).
+    """
+    import sys
+
     from spade.engine import Config, ForensicsEngine
 
     config = config or Config()
     records = []
-    for sample in samples:
+    t0 = time.perf_counter()
+    for i, sample in enumerate(samples, start=1):
         start = time.perf_counter()
         engine = ForensicsEngine(config)
         source_sigma, donor_sigma = _jpeg_sigmas(sample)
@@ -78,6 +84,10 @@ def score_samples(samples: Sequence, config=None) -> List[SampleRecord]:
             gt_mask=sample.mask,
             seconds=time.perf_counter() - start,
         ))
+        if progress and (i % 10 == 0 or i == len(samples)):
+            elapsed = time.perf_counter() - t0
+            print(f"  {i}/{len(samples)} samples done, {elapsed:.0f}s, ~{elapsed / i * (len(samples) - i):.0f}s left",
+                  file=sys.stderr, flush=True)
     return records
 
 

@@ -145,7 +145,7 @@ def main(argv=None):
     samples = load(args.dataset, **_dataset_kwargs(args))
     positives, negatives = split_labels(samples)
 
-    records = calibration.score_samples(samples)
+    records = calibration.score_samples(samples, progress=True)
     results = {"spade": calibration.summary(records)}
     if not args.no_baselines and args.task == "splice":
         results["rootsift+ransac"] = evaluate(RootSiftRansacDetector(), positives, negatives)
