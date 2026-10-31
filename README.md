@@ -205,6 +205,13 @@ config = Config(pyramid_enabled=True, pyramid_scales=[1.0, 0.5, 0.25])
 engine = ForensicsEngine(config)
 ```
 
+The pyramid only covers copies that got smaller. For copies that were enlarged,
+`query_scales=[1.0, 0.75, 0.5]` also searches the questioned image shrunk to
+those sizes. Each extra scale is another full search, and the NFA is
+multiplied by the number of passes. On 14 resized CASIA v2 splices it found 5
+instead of 4 (mean IoU 0.12 -> 0.19) and took 1.7x as long, so it's off by
+default.
+
 #### Heatmap and Report
 
 ```python

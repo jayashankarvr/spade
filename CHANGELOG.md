@@ -65,6 +65,7 @@ This release reworks the matching pipeline. On the synthetic benchmark
 
 ### Added (collections and review)
 - **Mirrored copies, on by default**: the mirrored query is searched too (`Match.mirrored`, `CoherentRegion.mirrored`; `Config(flip_invariant=False)` to disable). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged; copy-move on real photos: no extra false alarms. Doubles search time.
+- `Config.query_scales`: also search the questioned image shrunk, for copies that were enlarged before pasting (`Match.source_scale`). Off by default: on 14 resized CASIA v2 splices it found 5 instead of 4 at 1.7x the time.
 - **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
 - **Provenance graph**: `spade.provenance.build_provenance` and `spade provenance DIR [--copy-moves] [--json] [--dot]` - which images share regions, under FDR control across the collection. Links are undirected on purpose.
 - **Compressed index for large collections, on by default**: `index_type="ivfpq"` - FAISS IVF-PQ, trained once `ivf_train_size` (50,000) patches are in, exact until then; deletes and save/load supported. 200k descriptors: 5x smaller, 22x faster search. Real-photo splices with it forced on: identical IoU, recall and false-alarm rate to the exact index. `index_type="flat"` stays exact.
