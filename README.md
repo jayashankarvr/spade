@@ -72,6 +72,9 @@ spade index images/ -o myindex
 
 # Search against the saved index; patches are reloaded from the indexed files
 spade search query.jpg myindex -k 5
+
+# Scan many questioned images, holding the false discovery rate at 5%
+spade scan myindex questioned/*.jpg --fdr 0.05
 ```
 
 ### Python API
@@ -325,9 +328,24 @@ region before concluding.
 
 ## Benchmark
 
-`python -m spade.bench.runner` builds synthetic recolored splices with exact
-ground truth (96x96 images, 24x24 splice, color grade 0.15, 20 spliced + 20
-clean pairs) and compares SPADE with a RootSIFT + RANSAC baseline:
+`python -m spade.bench.runner` scores SPADE (and a RootSIFT + RANSAC baseline)
+on one of several datasets:
+
+| `--dataset` | What it is |
+|---|---|
+| `synthetic` (default) | procedural textures with recolored splices; exact ground truth |
+| `photos` | splices between real photos bundled with scikit-image (real noise and JPEG history) |
+| `casia2` | CASIA v2 cross-image splices with their real donor images; `python -m spade.bench.download casia2` fetches it from Kaggle (needs `KAGGLE_USERNAME`/`KAGGLE_KEY`) |
+| `manifest` | your own data: a CSV of `donor,tampered,mask,label` |
+
+`--calibrate` checks the NFA's promise directly: for a range of thresholds it
+reports false regions per image pair (should stay at or below the threshold)
+next to recall. On 40 photo splices + 40 unrelated pairs at JPEG quality 75 it
+reports no false regions at any threshold up to 10 and 92.5% recall from
+NFA < 10^-4 on.
+
+Synthetic run (96x96 images, 24x24 splice, color grade 0.15, 20 spliced + 20
+clean pairs):
 
 | | IoU | Precision | Recall | Detection AUC | s / image |
 |---|---|---|---|---|---|

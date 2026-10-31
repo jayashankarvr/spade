@@ -1,21 +1,24 @@
-"""Benchmark runner: generate samples, run detectors, report numbers.
+"""Benchmark runner: load a dataset, run detectors, report numbers.
 
-Runs SPADE against the baselines on synthetic recolored splices to see where it
-actually stands. Any change to matching defaults should be checked here.
+Runs SPADE against the baselines to see where it actually stands. Any change
+to matching defaults should be checked here.
 
 Usage:
     python -m spade.bench.runner --n 40 --grade 0.15
+    python -m spade.bench.runner --dataset photos --n 60 --negatives 60 --calibrate
+    python -m spade.bench.runner --dataset casia2 --n 300 --negatives 300 --calibrate --json out.json
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from typing import Dict, List, Sequence
 
-import numpy as np
-
-from spade.bench.baselines import Detector, RootSiftRansacDetector, SpadeDetector
+from spade.bench import calibration
+from spade.bench.baselines import Detector, RootSiftRansacDetector
+from spade.bench.datasets import load, split_labels
 from spade.bench.metrics import aggregate, detection_auc, localization_scores
 from spade.bench.synthetic import make_negative_pair, make_recolored_splice
 
@@ -28,7 +31,7 @@ def build_samples(
     jpeg_quality=None,
     negatives: int = 0,
 ):
-    """Build a labelled sample set: `n` positives (with splice) + `negatives`."""
+    """Synthetic positives and negatives (kept for existing callers)."""
     positives = [
         make_recolored_splice(
             seed=i,
@@ -77,6 +80,9 @@ def run(
     negatives: int = 0,
     detectors: Sequence[Detector] = None,
 ) -> Dict[str, Dict]:
+    """Synthetic benchmark across detectors (SPADE + RootSIFT by default)."""
+    from spade.bench.baselines import SpadeDetector
+
     if detectors is None:
         detectors = [SpadeDetector(), RootSiftRansacDetector()]
     positives, negs = build_samples(
@@ -96,30 +102,59 @@ def _format_table(results: Dict[str, Dict]) -> str:
     return "\n".join(lines)
 
 
+def _dataset_kwargs(args) -> Dict:
+    if args.dataset == "synthetic":
+        return dict(n=args.n, negatives=args.negatives, image_size=args.image_size,
+                    fragment_size=args.fragment_size, color_grade_strength=args.grade,
+                    jpeg_quality=args.jpeg, seed=args.seed)
+    if args.dataset == "photos":
+        return dict(n=args.n, negatives=args.negatives, color_grade_strength=args.grade,
+                    jpeg_quality=args.jpeg, seed=args.seed)
+    if args.dataset == "casia2":
+        return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed)
+    return dict(path=args.root)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="SPADE benchmark runner")
+    p.add_argument("--dataset", default="synthetic", choices=["synthetic", "photos", "casia2", "manifest"])
+    p.add_argument("--root", default=None, help="casia2 folder or manifest CSV path")
     p.add_argument("--n", type=int, default=40, help="number of positive (spliced) samples")
-    p.add_argument("--image-size", type=int, default=96)
-    p.add_argument("--fragment-size", type=int, default=24)
-    p.add_argument("--grade", type=float, default=0.15, help="color-grade strength (0 = none)")
-    p.add_argument("--jpeg", type=int, default=None, help="JPEG quality applied to tampered image")
-    p.add_argument("--negatives", type=int, default=20, help="number of negative (no-splice) samples")
+    p.add_argument("--negatives", type=int, default=20, help="number of negative (unrelated) pairs")
+    p.add_argument("--image-size", type=int, default=96, help="synthetic only")
+    p.add_argument("--fragment-size", type=int, default=24, help="synthetic only")
+    p.add_argument("--grade", type=float, default=0.15, help="color-grade strength (generated datasets)")
+    p.add_argument("--jpeg", type=int, default=None, help="JPEG quality for the tampered image (generated datasets)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--calibrate", action="store_true", help="also report false regions per pair vs NFA threshold")
+    p.add_argument("--no-baselines", action="store_true", help="skip the RootSIFT baseline")
+    p.add_argument("--json", default=None, help="write all numbers to this file")
     args = p.parse_args(argv)
 
-    results = run(
-        n=args.n,
-        image_size=args.image_size,
-        fragment_size=args.fragment_size,
-        color_grade_strength=args.grade,
-        jpeg_quality=args.jpeg,
-        negatives=args.negatives,
-    )
-    print(
-        f"\nSPADE benchmark | n={args.n} pos + {args.negatives} neg | "
-        f"size={args.image_size} frag={args.fragment_size} grade={args.grade} jpeg={args.jpeg}\n"
-    )
+    samples = load(args.dataset, **_dataset_kwargs(args))
+    positives, negatives = split_labels(samples)
+
+    records = calibration.score_samples(samples)
+    results = {"spade": calibration.summary(records)}
+    if not args.no_baselines:
+        results["rootsift+ransac"] = evaluate(RootSiftRansacDetector(), positives, negatives)
+
+    print(f"\nSPADE benchmark | {args.dataset} | {len(positives)} pos + {len(negatives)} neg | "
+          f"grade={args.grade} jpeg={args.jpeg}\n")
     print(_format_table(results))
-    return results
+
+    report = {"dataset": args.dataset, "args": vars(args), "results": results}
+    if args.calibrate:
+        rows = calibration.calibration_table(records)
+        print("\nNFA calibration (false regions per pair should stay <= epsilon):\n")
+        print(calibration.format_table(rows))
+        report["calibration"] = rows
+
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(report, f, indent=2, default=float)
+        print(f"\nWrote {args.json}")
+    return report
 
 
 if __name__ == "__main__":

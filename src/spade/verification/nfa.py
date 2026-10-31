@@ -26,6 +26,7 @@ Two approximations, both on the conservative side:
 from __future__ import annotations
 
 import math
+from typing import List, Sequence
 
 import numpy as np
 from scipy import stats
@@ -54,3 +55,32 @@ def log10_nfa(k: float, n: float, p: float, n_tests: float) -> float:
         # it's off by a small factor at most - irrelevant at these magnitudes.
         log_tail = stats.binom.logpmf(k_int, n_int, p)
     return log_tests + float(log_tail) / math.log(10.0)
+
+
+def fdr_select(results: Sequence, q: float = 0.05) -> List:
+    """Regions declared copies with the false discovery rate held at ``q``.
+
+    NFA < 1 bounds the expected number of chance regions *per search*. When
+    many questioned images are searched, what usually matters is the share of
+    reported regions that are wrong; Benjamini-Hochberg over every region
+    hypothesis of every search controls exactly that. Hypotheses that never
+    formed a region have larger p-values than any that did, so ranking the
+    observed regions is enough.
+
+    Args:
+        results: ``MatchResult`` objects from ``ForensicsEngine.match``.
+        q: target false discovery rate.
+
+    Returns:
+        The selected regions, most significant first.
+    """
+    regions = [r for res in results for r in res.coherent_regions if r.log10_p is not None]
+    m = sum(res.stats.get("n_tests", 0.0) for res in results)
+    if not regions or m <= 0:
+        return []
+    regions.sort(key=lambda r: r.log10_p)
+    cutoff = 0
+    for i, region in enumerate(regions, start=1):
+        if region.log10_p <= math.log10(i * q / m):
+            cutoff = i
+    return regions[:cutoff]

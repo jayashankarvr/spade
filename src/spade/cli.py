@@ -253,6 +253,41 @@ def search(
 
 
 @cli.command()
+@click.argument("index_file")
+@click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--fdr", default=0.05, show_default=True, help="False discovery rate across all reported regions")
+def scan(index_file: str, sources, fdr: float):
+    """Search many SOURCES against INDEX_FILE, keeping the false discovery rate at --fdr.
+
+    NFA < 1 bounds chance regions per search; across many searches, this
+    bounds the share of reported regions that are wrong instead.
+    """
+    from spade.verification.nfa import fdr_select
+
+    if not 0 < fdr < 1:
+        raise click.BadParameter(f"fdr must be in (0, 1), got {fdr}")
+    try:
+        engine = ForensicsEngine.load(index_file)
+    except Exception as e:
+        raise click.ClickException(f"Failed to load index: {e}")
+
+    results = {}
+    with click.progressbar(sources, label="Searching") as progress:
+        for path in progress:
+            results[path] = engine.match(safe_load_image(path), return_heatmap=False)
+
+    selected = fdr_select(list(results.values()), q=fdr)
+    owner = {id(r): path for path, res in results.items() for r in res.coherent_regions}
+    click.echo(f"\n{len(selected)} region(s) at FDR {fdr} across {len(sources)} image(s):")
+    for region in selected:
+        x, y, w, h = region.source_bbox
+        click.echo(
+            f"  {owner[id(region)]}: ({x},{y}) {w}x{h} <- {region.image_id}, "
+            f"{len(region.matches)} patches, log10 NFA {region.log10_nfa:.1f}"
+        )
+
+
+@cli.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8000, help="Port to listen on")
 @click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")

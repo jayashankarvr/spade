@@ -50,6 +50,12 @@ This release reworks the matching pipeline. On the synthetic benchmark
 - Config fields `descriptor_dim`, `descriptor_spatial_pooling`, `auto_train_pca`, `pca_train_samples`, `scale_weights`, `lsh_*`, `use_gpu`, `use_learned_descriptors`, `learned_model`, `distributed_enabled`, `num_shards`, `scoring_mode`, `aggregation_mode`, `priors_dir`. `SpatialAggregator.find_regions`, `SpatialCoherenceVerifier(min_cluster_probability=...)`.
 - Index files from earlier versions can't be loaded (they were in a different descriptor space anyway); re-index.
 
+### Added (measurement and evidence)
+- **Real-data benchmarks** (`spade.bench.datasets`): splices between real photos (scikit-image's public-domain set), CASIA v2 cross-image splices with their actual donor images (donor vs host decided from pixels, never by SPADE), and a CSV manifest for your own data. `python -m spade.bench.download casia2` fetches CASIA v2 from Kaggle.
+- **NFA calibration** (`spade.bench.calibration`, `runner --calibrate`): false regions per image pair against the NFA threshold, next to recall, from a single pass.
+- **False discovery rate across searches**: `spade.verification.nfa.fdr_select` (Benjamini-Hochberg over every region hypothesis) and `spade scan INDEX IMAGES... --fdr Q`. Regions carry `n_tests` and `log10_p`; results carry `stats["n_tests"]`.
+- Tried and dropped because they didn't hold up on the calibration benchmark: per-patch "rarity" chance rates in the NFA (either lost half the recall on JPEG photos or broke the false-alarm guarantee) and a sensor-noise residual check (JPEG removes chroma noise; luminance residuals are already correlated by the matching itself).
+
 ### Added (before the rework)
 - **JSON forensic report** (`spade.report`): versioned, audit-defensible report with input SHA-256s, config, localization, the recovered affine color transform `(M,b)`, and image-level `cues`. Written via `spade match -j report.json`. Schema 1.1.
 - **Scale-inconsistency forensic cue** (`spade.scale`): native-scale (effective-resolution) estimation plus a resize/resampling-detection signal, surfaced in the report under `cues.scale_inconsistency` with an anomaly bounding box.

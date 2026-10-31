@@ -12,7 +12,7 @@ A `SpliceSample` gives a detector two inputs - the `donor` (reference) and the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
@@ -21,14 +21,19 @@ from PIL import Image
 
 @dataclass
 class SpliceSample:
-    """One benchmark instance with ground truth."""
+    """One benchmark instance with ground truth.
+
+    Real datasets only know the images and the mask; ``bbox`` and the color
+    transform are filled in when we generated the splice ourselves.
+    """
     donor: np.ndarray          # reference image (uint8 HxWx3), source of the fragment
     tampered: np.ndarray       # host image with the recolored fragment spliced in
     mask: np.ndarray           # bool HxW ground-truth mask (True = spliced pixels) in tampered coords
-    bbox: Tuple[int, int, int, int]   # (x, y, w, h) of the splice in tampered
-    color_M: np.ndarray        # applied 3x3 color matrix (target = M @ source + b)
-    color_b: np.ndarray        # applied bias (in [0,1] scale)
-    params: dict               # generation parameters (size, grade, jpeg, seeds)
+    bbox: Optional[Tuple[int, int, int, int]] = None   # (x, y, w, h) of the splice in tampered
+    color_M: Optional[np.ndarray] = None   # applied 3x3 color matrix (target = M @ source + b)
+    color_b: Optional[np.ndarray] = None   # applied bias (in [0,1] scale)
+    params: dict = field(default_factory=dict)   # generation parameters / provenance
+    label: int = 1             # 1 = tampered contains a region from donor, 0 = unrelated pair
 
 
 def _textured_image(rng: np.random.RandomState, h: int, w: int) -> np.ndarray:
@@ -189,4 +194,5 @@ def make_negative_pair(seed: int = 0, image_size: int = 96) -> SpliceSample:
         color_M=np.eye(3),
         color_b=np.zeros(3),
         params={"seed": seed, "image_size": image_size, "negative": True},
+        label=0,
     )

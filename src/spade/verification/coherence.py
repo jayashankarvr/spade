@@ -24,6 +24,16 @@ class CoherentRegion:
     color_b: Optional[np.ndarray] = None
     log10_nfa: Optional[float] = None
     max_log10_nfa: float = 0.0
+    # Region hypotheses tried in the search that produced this region; NFA is
+    # n_tests times the region's own p-value (used for FDR across searches).
+    n_tests: Optional[float] = None
+
+    @property
+    def log10_p(self) -> Optional[float]:
+        """log10 of the region's own p-value (its NFA without the multiple-testing factor)."""
+        if self.log10_nfa is None or not self.n_tests:
+            return None
+        return self.log10_nfa - float(np.log10(self.n_tests))
 
     @property
     def significant(self) -> bool:

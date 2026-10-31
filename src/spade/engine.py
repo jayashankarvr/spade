@@ -447,11 +447,12 @@ class ForensicsEngine:
         )
         matches = candidates.matches
 
+        searched = [t for t in self._targets if target_ids is None or t in set(target_ids)]
+        n_tests = self._count_tests(source_shape, len(src_patches), searched)
         regions: List[CoherentRegion] = []
         if self.config.coherence_enabled and matches:
-            searched = [t for t in self._targets if target_ids is None or t in set(target_ids)]
             regions = self._significant_regions(
-                candidates, src_patches, src_coords, source_shape, verified_per_target, searched
+                candidates, src_patches, src_coords, verified_per_target, n_tests
             )
 
         best_match = None
@@ -476,7 +477,7 @@ class ForensicsEngine:
             best_match=best_match,
             heatmap=heatmap,
             coherent_regions=regions,
-            stats=self._stats(len(src_patches), len(matches), regions),
+            stats={**self._stats(len(src_patches), len(matches), regions), "n_tests": n_tests},
             localization=localization,
         )
 
@@ -549,18 +550,13 @@ class ForensicsEngine:
     # Region-level verification
     # ------------------------------------------------------------------
 
-    def _significant_regions(self, candidates, src_patches, src_coords, source_shape, verified_per_target, searched):
-        """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA.
+    def _count_tests(self, source_shape, n_source: int, searched: List[str]) -> float:
+        """Region hypotheses a search tries: offsets x scales x region seeds, over every target searched.
 
-        ``searched`` is every target the query was compared against; each one
-        multiplies the number of region hypotheses tried, hits or not.
+        Every target counts, hits or not; leaving out the ones without hits
+        would understate how hard we looked.
         """
-        clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
-        clusters.sort(key=lambda r: len(r.matches), reverse=True)
-        row_of = {id(m): i for i, m in enumerate(candidates.matches)}
-
         cfg = self.config
-        n_source = len(src_patches)
         overlap = overlap_factor(cfg.patch_size, cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         n_scales = len(cfg.pyramid_scales) if self.pyramid is not None else 1
@@ -569,7 +565,18 @@ class ForensicsEngine:
             (sw + self._targets[t].shape[1]) * (sh + self._targets[t].shape[0]) / window * n_scales
             for t in searched
         )
-        n_tests = max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+        return max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
+
+    def _significant_regions(self, candidates, src_patches, src_coords, verified_per_target, n_tests):
+        """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA."""
+        clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
+        clusters.sort(key=lambda r: len(r.matches), reverse=True)
+        row_of = {id(m): i for i, m in enumerate(candidates.matches)}
+
+        cfg = self.config
+        n_source = len(src_patches)
+        overlap = overlap_factor(cfg.patch_size, cfg.stride)
+        window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         max_log10_nfa = float(np.log10(cfg.max_nfa))
 
         regions = []
@@ -609,6 +616,7 @@ class ForensicsEngine:
             p = min(1.0, verified_per_target[cluster.image_id] / (n_source * n_target) * window)
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
+            region.n_tests = n_tests
             regions.append(region)
 
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
