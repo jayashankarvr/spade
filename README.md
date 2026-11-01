@@ -447,19 +447,43 @@ pixel-identical, so some "false" detections there are real matches (see the
 note above). Synthetic data is a sanity check, not a substitute for a real forensic
 dataset.
 
-**CASIA v2** (real cross-image splices with their actual donor images; 60
-spliced + 60 unrelated pairs, `--dataset casia2`):
+**CASIA v2** (real cross-image splices with their actual donor images; 40
+spliced + 40 unrelated pairs, `--dataset casia2`):
 
-| | IoU | Precision | Recall | Detection AUC | s / image |
-|---|---|---|---|---|---|
-| SPADE | 0.27 | 0.98 | 0.29 | 0.72 | 21 |
-| RootSIFT + RANSAC | 0.18 | 0.95 | 0.19 | 0.82 | 0.1 |
+| | IoU | Precision | Recall | Detection AUC | Found at NFA < 10^-3 | s / image |
+|---|---|---|---|---|---|---|
+| SPADE | 0.39 | 0.97 | 0.41 | 0.82 | 47.5% | 18 |
+| RootSIFT + RANSAC (60 + 60 pairs) | 0.18 | 0.95 | 0.19 | 0.82 | - | 0.1 |
 
-Real splices are much harder than the generated ones: SPADE finds about a
-third of them, localizes them better than the keypoint baseline, and stays
-precise (one false region across all 120 pairs; no alarm on any unrelated pair
-below NFA 10). Many CASIA splices are resized or rotated before pasting, which
-the default configuration doesn't handle.
+Real splices are much harder than the generated ones. SPADE finds about half
+of them and stays precise: no alarm on any unrelated pair at any threshold,
+and one region in the 80 pairs that landed beside a splice instead of on it.
+Most of the misses are copies that were enlarged before pasting (about half
+of CASIA's splices are scaled up 1.15-2.5x), nearly flat regions with no
+texture to match, and very small splices. `query_scales=[1.0, 0.75, 0.5]`
+covers enlarged copies; on the same pairs it raises the share found to 50%
+(57.5% at NFA < 1) but adds misplaced regions on spliced images and takes
+over 4x as long, so it stays opt-in.
+
+**Copy-move** (`--task copymove` on photos, or the standard sets):
+
+| Dataset | Found at NFA < 10^-3 | Found at NFA < 1 | Clean images with an alarm (NFA < 10^-3) |
+|---|---|---|---|
+| Photo crops, recolored copies (60 + 60) | 72% | 78% | 0% |
+| CoMoFoD translation (25 + 25) | 40% | 44% | 0% |
+| CoMoFoD rotation (25 + 25) | 20% | 24% | 8% |
+| CoMoFoD scaling (25 + 25) | 16% | 16% | 8% |
+| COVERAGE (100 + 100) | 31% | 33% | 3% |
+
+Copy-move is the harder task. Rotated and rescaled copies need the
+experimental `rotation_invariant` mode or aren't handled yet, and the clean
+images in CoMoFoD and COVERAGE are full of objects that genuinely repeat
+(identical printed logos, rows of windows, similar-but-genuine objects by
+design in COVERAGE). Those are real duplicates as far as pixels go, and SPADE
+can't yet tell them from a pasted copy; that, more than chance, is where the
+alarms on clean images come from. Splitting a match cluster into connected
+parts finds many more copies (CoMoFoD translation 40% -> 84%) but also flags
+12-28% of the clean images, so it is used for cross-image search only.
 
 ## Project structure
 
