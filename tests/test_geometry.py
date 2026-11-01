@@ -198,6 +198,7 @@ class TestSymmetricObjects:
 
         assert not _halves_touch(self._region((10, 10, 40, 40), (120, 15, 40, 40)), 10)   # far apart
         assert not _halves_touch(self._region((10, 10, 40, 40), (52, 90, 40, 40)), 10)    # adjacent column, other rows
+        assert not _halves_touch(self._region((10, 10, 40, 40), (55, 22, 40, 40)), 10)    # adjacent, shifted 12 px down
 
     def test_symmetric_image_has_no_copy_move(self):
         rng = np.random.RandomState(0)

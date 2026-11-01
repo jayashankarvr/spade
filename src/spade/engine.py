@@ -1079,17 +1079,18 @@ def _to_uint8(image: np.ndarray) -> np.ndarray:
     return np.clip(np.round(image * 255.0), 0, 255).astype(np.uint8)
 
 
-def _halves_touch(region, max_gap: int) -> bool:
-    """Source and target boxes sit side by side and mostly share their rows.
+def _halves_touch(region, max_gap: int, max_shift: int = 2) -> bool:
+    """Source and target sit side by side on the same rows: two halves of one symmetric object.
 
-    ``max_gap`` is the self-match minimum offset: patches that close to the
-    mirror axis can't match across it, which leaves a gap that wide.
+    A left-right symmetric object mirrors about a vertical axis, so its halves
+    line up row for row (vertical shift within ``max_shift``) and meet at the
+    axis. ``max_gap`` is the self-match minimum offset: patches that close to
+    the axis can't match across it, which leaves a gap that wide.
     """
     sx, sy, sw, sh = region.source_bbox
     tx, ty, tw, th = region.target_bbox
     gap = max(tx - (sx + sw), sx - (tx + tw))
-    shared_rows = min(sy + sh, ty + th) - max(sy, ty)
-    return gap <= max_gap and shared_rows >= 0.5 * min(sh, th)
+    return gap <= max_gap and abs(ty - sy) <= max_shift and abs(th - sh) <= 2 * max_shift
 
 
 def _wrap_angle(angle):
