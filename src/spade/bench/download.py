@@ -4,7 +4,8 @@ Usage:
     python -m spade.bench.download casia2
 
 Datasets come from Kaggle and need credentials: an API token in
-KAGGLE_API_TOKEN, or KAGGLE_USERNAME and KAGGLE_KEY, or ~/.kaggle/kaggle.json
+KAGGLE_API_TOKEN (or KAGGLE_ACCESS_TOKEN), or KAGGLE_USERNAME and KAGGLE_KEY,
+or ~/.kaggle/kaggle.json
 (kaggle.com -> Settings -> API). They're research datasets under their own
 terms; nothing here redistributes them.
 """
@@ -24,12 +25,18 @@ DATASETS = {
 }
 
 
+def _token():
+    """An API token from the environment; both variable names are in use."""
+    return os.environ.get("KAGGLE_API_TOKEN") or os.environ.get("KAGGLE_ACCESS_TOKEN")
+
+
 def _kaggle_api():
-    has_token = bool(os.environ.get("KAGGLE_API_TOKEN"))
+    has_token = bool(_token())
     has_key = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
     if not (has_token or has_key or (Path.home() / ".kaggle" / "kaggle.json").exists()):
         raise SystemExit(
-            "Kaggle credentials missing. Set KAGGLE_API_TOKEN, or KAGGLE_USERNAME and KAGGLE_KEY "
+            "Kaggle credentials missing. Set KAGGLE_API_TOKEN (or KAGGLE_ACCESS_TOKEN), or KAGGLE_USERNAME "
+            "and KAGGLE_KEY "
             "(kaggle.com -> Settings -> API)."
         )
     try:
@@ -73,7 +80,7 @@ def download(name: str) -> Path:
         return target
     target.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {ref} into {target} ...")
-    token = os.environ.get("KAGGLE_API_TOKEN")
+    token = _token()
     if token:
         _download_with_token(ref, target, token)
     else:

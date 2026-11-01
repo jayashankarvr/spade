@@ -146,3 +146,15 @@ class TestGeometricVariants:
         assert [s.label for s in samples] == [1, 1, 0]
         assert all(s.donor is None for s in samples)
         assert samples[0].mask.sum() == 2 * 24 * 24
+
+    def test_copy_moves_skip_photos_with_their_own_duplicates(self):
+        pytest.importorskip("skimage")
+        import skimage.data
+
+        # The reason for the exclusion: grass repeats a region 162 px lower.
+        g = skimage.data.grass().astype(float)
+        a, b = g[47:77, 290:376], g[209:239, 293:379]
+        assert np.corrcoef(a.ravel(), b.ravel())[0, 1] > 0.85
+
+        samples = load("photos", copy_move=True, n=20, negatives=20, crop_size=96, fragment_size=24)
+        assert not any(s.params["photo"] == "grass" for s in samples)

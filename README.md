@@ -412,7 +412,7 @@ on one of several datasets:
 |---|---|
 | `synthetic` (default) | procedural textures with recolored splices; exact ground truth |
 | `photos` | splices between real photos bundled with scikit-image (real noise and JPEG history) |
-| `casia2` | CASIA v2 cross-image splices with their real donor images; `python -m spade.bench.download casia2` fetches it from Kaggle (needs `KAGGLE_USERNAME`/`KAGGLE_KEY`) |
+| `casia2` | CASIA v2 cross-image splices with their real donor images; `python -m spade.bench.download casia2` fetches it from Kaggle (needs a Kaggle API token in `KAGGLE_API_TOKEN` or `KAGGLE_ACCESS_TOKEN`, or `KAGGLE_USERNAME`/`KAGGLE_KEY`) |
 | `manifest` | your own data: a CSV of `donor,tampered,mask,label` |
 
 `--calibrate` checks the NFA's promise directly: for a range of thresholds it

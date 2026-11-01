@@ -59,6 +59,12 @@ _PHOTO_NAMES = (
     "astronaut", "chelsea", "coffee", "rocket", "hubble_deep_field",
     "immunohistochemistry", "retina", "camera", "brick", "grass", "gravel", "moon",
 )
+# Photos that already contain a duplicated region, so a copy-move test can't
+# treat them as clean. In "grass", parts of the area near the top (x ~288-448)
+# reappear 162 px lower and 3 px right (e.g. rows 47-77 at x 290-376: correlation
+# 0.91). SPADE finds it, and any crop covering both copies was scored as a
+# false alarm.
+_SELF_DUPLICATED = {"grass"}
 
 
 def load_photos() -> Dict[str, np.ndarray]:
@@ -203,7 +209,7 @@ def photo_copy_moves(
 ) -> List[SpliceSample]:
     """Within-image copy-moves on photo crops (``donor`` is None), plus untouched crops."""
     photos = load_photos()
-    names = sorted(photos)
+    names = sorted(set(photos) - _SELF_DUPLICATED)
     rng = np.random.RandomState(seed)
     samples = []
     fs = fragment_size
