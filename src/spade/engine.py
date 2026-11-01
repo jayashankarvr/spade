@@ -839,13 +839,18 @@ class ForensicsEngine:
         # share its offset anywhere in the image. Left together, they stretch
         # the region's box over half the image and drown the copy. A copy is
         # one connected piece, so score each spatially connected part alone.
-        src_xy = src_coords[candidates.src_idx]
-        clusters = [
-            (offset, part, image_id, rotation)
-            for offset, rows, image_id, rotation in clusters
-            for part in _connected_parts(rows, src_xy[rows], cfg.patch_size)
-            if len(part) >= cfg.coherence_min_cluster
-        ]
+        # Not for copy-move: within one image, splitting also exposes objects
+        # that genuinely repeat (identical printed logos, rows of windows), and
+        # nothing here tells those from a copy yet. On CoMoFoD and COVERAGE
+        # originals it flagged 12-28% of untouched photos.
+        if self._self_min_offset is None:
+            src_xy = src_coords[candidates.src_idx]
+            clusters = [
+                (offset, part, image_id, rotation)
+                for offset, rows, image_id, rotation in clusters
+                for part in _connected_parts(rows, src_xy[rows], cfg.patch_size)
+                if len(part) >= cfg.coherence_min_cluster
+            ]
         clusters.sort(key=lambda c: len(c[1]), reverse=True)
 
         n_source = len(src_patches)
