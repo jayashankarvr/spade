@@ -44,7 +44,7 @@ from spade.exceptions import (
     TargetExistsError,
 )
 from spade.extraction.patches import PatchExtractor, max_entropy
-from spade.extraction.orientation import canonical_patches, patch_orientations
+from spade.extraction.orientation import canonical_patches, patch_orientations, relative_angles, ring_samples
 from spade.extraction.pyramid import ImagePyramid
 from spade.jpeg import quantization_sigma
 from spade.logging_config import get_logger
@@ -564,8 +564,9 @@ class ForensicsEngine:
                 localization=localize_region([], source_shape),
             )
 
+        src_gray = source_image @ LUMA if self.config.rotation_invariant else None
         candidates, verified_per_target = self._verified_candidates(
-            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma, mirror_width
+            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma, mirror_width, src_gray
         )
         matches = candidates.matches
 
@@ -701,7 +702,7 @@ class ForensicsEngine:
         return ProbabilityModel(noise_sigma=float(sigma))
 
     def _verified_candidates(self, src_patches, src_coords, src_thetas, descriptors, target_ids,
-                             jpeg_sigma=0.0, mirror_width=None):
+                             jpeg_sigma=0.0, mirror_width=None, src_gray=None):
         """k-NN search plus the per-patch chi-square pre-filter, vectorized."""
         k = self.config.k_neighbors
         if self._self_min_offset is not None:
@@ -732,6 +733,9 @@ class ForensicsEngine:
             sel = owners == owner
             src_idx, tgt_idx = rows[sel], tgt_all[sel]
             noise = self._noise_model(image_id, jpeg_sigma)
+            # Rotation mode: each match's angle comes from the rings around the
+            # two patches (rotation mode indexes full resolution only).
+            tgt_gray = (target.levels[1.0].astype(np.float32) / 255.0) @ LUMA if src_gray is not None else None
             if self._self_min_offset is not None:
                 source_xy = src_coords[src_idx].copy()
                 if mirror_width is not None:  # judge distance and direction in original coordinates
@@ -758,7 +762,11 @@ class ForensicsEngine:
                     "src_idx": s_ok, "tgt_idx": t_ok, "prob": prob[ok].astype(np.float64),
                     "src_xy": src_coords[s_ok], "tgt_xy": target.coords[t_ok],
                     "scale": target.scales[t_ok].astype(np.float64),
-                    "rotation": _wrap_angle(target.thetas[t_ok] - src_thetas[s_ok]).astype(np.float64),
+                    "rotation": (
+                        _wrap_angle(relative_angles(ring_samples(src_gray, src_coords[s_ok], self.config.patch_size),
+                                                    ring_samples(tgt_gray, target.coords[t_ok], self.config.patch_size)))
+                        if src_gray is not None else np.zeros(len(ok))
+                    ).astype(np.float64),
                     "owner": np.full(len(ok), owner, dtype=np.int64),
                 })
                 verified_per_target[image_id] = verified_per_target.get(image_id, 0) + len(ok)

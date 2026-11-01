@@ -263,3 +263,23 @@ class TestConnectedParts:
         engine = ForensicsEngine()
         engine.index_target(camera, "camera")
         assert not engine.match(skimage.astronaut()[:512, :512], return_heatmap=False).significant_regions
+
+
+class TestRingAngles:
+    def test_recovers_a_known_rotation(self):
+        from scipy.ndimage import gaussian_filter, rotate
+
+        from spade.extraction.orientation import relative_angles, ring_samples
+
+        rng = np.random.RandomState(3)
+        gray = gaussian_filter(rng.rand(120, 120), 1.5)
+        turned = rotate(gray, 40, reshape=False, order=1, mode="reflect")
+        c = 59.5
+        pts = np.array([(x, y) for x in range(40, 80, 4) for y in range(40, 80, 4)], float)
+        t = np.radians(40)
+        # scipy turns the content counter-clockwise on screen, which is -40 deg in image (y-down) coordinates.
+        moved = (pts - c) @ np.array([[np.cos(t), np.sin(t)], [-np.sin(t), np.cos(t)]]).T + c
+        half = 2.0
+        a = relative_angles(ring_samples(gray, pts - half, 5), ring_samples(turned, moved - half, 5))
+        err = np.degrees(np.angle(np.exp(1j * (a + t))))
+        assert np.median(np.abs(err)) < 3
