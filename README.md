@@ -144,10 +144,11 @@ The image is matched against itself, ignoring offsets shorter than twice the
 patch size. Each duplicated pair is reported once; `localization` covers both
 copies. Repetitive texture (brick, gravel, lattices) matches itself at many
 offsets, so a region only counts when its offset clearly beats every other
-offset its patches support - a region-level ratio test. On real-photo
-copy-moves at JPEG 90 that keeps false regions at about 0.02 per image, at the
-cost of finding about half of the copies; content that is pixel-identical by
-construction (an exact tiling) is still reported, because it is a duplicate.
+offset its patches support - a region-level ratio test. On 60 recolored
+real-photo copy-moves plus 60 clean crops it reports no false regions at any
+threshold and finds 68-80% of the copies (NFA 1e-4 to 10). Content that really
+is duplicated is still reported: scikit-image's `grass` photo contains a cloned
+strip, and SPADE finds it, so the benchmark leaves that photo out.
 
 #### JPEG-Aware Noise
 
