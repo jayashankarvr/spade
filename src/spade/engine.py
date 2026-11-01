@@ -64,9 +64,6 @@ logger = get_logger("engine")
 # Regions are verified biggest-first; past this many, the rest are tiny clusters
 # that couldn't reach significance anyway.
 _MAX_REGIONS = 100
-# Copy-move: drop a region when its patches back another offset at least this
-# strongly relative to their own (repeated objects, not one copy).
-_MAX_RIVALRY = 0.1
 # Pixel pairs used for one region-level color fit. Plenty for 12 parameters.
 _MAX_FIT_PIXELS = 20000
 _FIT_CHUNK = 20000
@@ -894,10 +891,7 @@ class ForensicsEngine:
                 # A chance match must also agree on the angle.
                 p *= _ANGLE_TOLERANCE / np.pi
             if self._self_min_offset is not None:
-                rate, rivalry = self._competing_offset_rate(candidates, np.nonzero(in_box)[0], offset, image_id)
-                if rivalry >= _MAX_RIVALRY:
-                    continue   # the same content repeats elsewhere: a repeated object, not one copy
-                p = max(p, rate)
+                p = max(p, self._competing_offset_rate(candidates, np.nonzero(in_box)[0], offset, image_id))
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
             region.n_tests = n_tests
@@ -906,12 +900,8 @@ class ForensicsEngine:
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
         return regions
 
-    def _competing_offset_rate(self, candidates, box: np.ndarray, offset, image_id: str) -> Tuple[float, float]:
-        """How strongly the region's patches also back the best *other* offset.
-
-        Returns (rate, rivalry): that offset's support as a share of the box,
-        used as a floor on the chance rate, and as a share of the support for
-        the region's own offset.
+    def _competing_offset_rate(self, candidates, box: np.ndarray, offset, image_id: str) -> float:
+        """Share of the region's patches that also agree on the best *other* offset.
 
         Within one image, texture repeats: brick, lattices, grass match
         themselves at several offsets, and a region test using the image-wide
@@ -921,29 +911,23 @@ class ForensicsEngine:
         a region-level version of Lowe's ratio test. Only used for self-matching:
         it cut false regions on real photos ~100x there, while for two-image
         searches it cost recall and bought nothing.
-
-        Rivalry catches repeated objects: three identical printed coasters
-        back two offsets about equally, a copy-move backs one. On CoMoFoD a
-        rivalry under 0.1 kept most copies and none of the originals' repeats.
         """
         if len(box) == 0:
-            return 0.0, 0.0
+            return 0.0
         tol = self.config.coherence_offset_tolerance
         offsets = candidates.offsets
         rows = np.nonzero(np.isin(candidates.src_idx, box) & (candidates.image_ids == image_id))[0]
         if len(rows) == 0:
-            return 0.0, 0.0
-        near = np.abs(offsets[rows] - np.array(offset)).max(axis=1)
-        own = len(np.unique(candidates.src_idx[rows[near <= tol]]))
-        far = rows[near > tol + 3]
+            return 0.0
+        far = rows[np.abs(offsets[rows] - np.array(offset)).max(axis=1) > tol + 3]
         if len(far) == 0:
-            return 0.0, 0.0
+            return 0.0
         cell = 2 * tol + 1
         keys = (offsets[far, 0] // cell) * 1_000_003 + (offsets[far, 1] // cell)
         # Count each source patch once per offset cell.
         pairs = np.unique(keys * (int(candidates.src_idx.max()) + 1) + candidates.src_idx[far])
         _, support = np.unique(pairs // (int(candidates.src_idx.max()) + 1), return_counts=True)
-        return min(1.0, support.max() / len(box)), support.max() / max(own, 1)
+        return min(1.0, support.max() / len(box))
 
     def _fit_region_transform(
         self, src: np.ndarray, tgt: np.ndarray, usable: np.ndarray
