@@ -132,7 +132,7 @@ def main(argv=None):
                    help="splice: donor image given; copymove: find duplicates within one image")
     p.add_argument("--root", default=None, help="dataset folder (casia2, coverage, comofod) or manifest CSV path")
     p.add_argument("--category", default=None,
-                   choices=["translation", "rotation", "scaling", "distortion", "combination"],
+                   choices=["translation", "rotation", "scaling"],
                    help="comofod only: one kind of copy-move")
     p.add_argument("--n", type=int, default=40, help="number of positive (spliced) samples")
     p.add_argument("--negatives", type=int, default=20, help="number of negative (unrelated) pairs")
@@ -150,6 +150,8 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     samples = load(args.dataset, **_dataset_kwargs(args))
+    if not samples:
+        raise SystemExit(f"no samples loaded from {args.dataset}")
     positives, negatives = split_labels(samples)
 
     records = calibration.score_samples(samples, progress=True)
@@ -157,7 +159,8 @@ def main(argv=None):
     if not args.no_baselines and all(s.donor is not None for s in samples):  # the baselines need a donor
         results["rootsift+ransac"] = evaluate(RootSiftRansacDetector(), positives, negatives)
 
-    print(f"\nSPADE benchmark | {args.dataset} {args.task} | {len(positives)} pos + {len(negatives)} neg | "
+    task = "copymove" if all(x.donor is None for x in samples) else "splice"
+    print(f"\nSPADE benchmark | {args.dataset} {task} | {len(positives)} pos + {len(negatives)} neg | "
           f"grade={args.grade} jpeg={args.jpeg}\n")
     print(_format_table(results))
 

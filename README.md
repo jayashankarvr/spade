@@ -422,7 +422,9 @@ on one of several datasets:
 |---|---|
 | `synthetic` (default) | procedural textures with recolored splices; exact ground truth |
 | `photos` | splices between real photos bundled with scikit-image (real noise and JPEG history) |
-| `casia2` | CASIA v2 cross-image splices with their real donor images; `python -m spade.bench.download casia2` fetches it from Kaggle (needs a Kaggle API token in `KAGGLE_API_TOKEN` or `KAGGLE_ACCESS_TOKEN`, or `KAGGLE_USERNAME`/`KAGGLE_KEY`) |
+| `casia2` | CASIA v2 cross-image splices with their real donor images; `python -m spade.bench.download casia2` fetches it from Kaggle (as do `coverage` and `comofod`) (needs a Kaggle API token in `KAGGLE_API_TOKEN` or `KAGGLE_ACCESS_TOKEN`, or `KAGGLE_USERNAME`/`KAGGLE_KEY`) |
+| `coverage` | COVERAGE copy-moves: 100 forgeries whose originals hold similar-but-genuine objects (the originals are the negatives). Masks are where each forgery differs from its original, which marks the pasted copy but not its source, so only recall of the copy is reported and a region counts as found when either half lands on the copy |
+| `comofod` | CoMoFoD copy-moves, the 120 base cases; masks mark both copies; `--category translation\|rotation\|scaling` |
 | `manifest` | your own data: a CSV of `donor,tampered,mask,label` |
 
 `--calibrate` checks the NFA's promise directly: for a range of thresholds it

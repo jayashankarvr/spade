@@ -459,11 +459,13 @@ COVERAGE_KAGGLE_REF = "ma7moud3tef/coverage"
 def _pasted_mask(original: np.ndarray, forged: np.ndarray, min_fraction: float = 0.002) -> np.ndarray:
     """Where the forged image differs from its original: the pasted copy.
 
-    Small specks (re-encoding noise) are dropped, holes in the copy filled.
+    The files are lossless, so any difference is the edit; a threshold would
+    drop exactly the hard cases, where the copy lands on something similar
+    and changes pixels only slightly. Specks are dropped, holes filled.
     """
     from scipy import ndimage
 
-    changed = np.abs(original.astype(np.int16) - forged.astype(np.int16)).max(axis=2) > 12
+    changed = np.abs(original.astype(np.int16) - forged.astype(np.int16)).max(axis=2) > 0
     changed = ndimage.binary_closing(ndimage.binary_opening(changed, np.ones((3, 3))), np.ones((5, 5)))
     labels, n = ndimage.label(changed)
     if n == 0:
@@ -490,17 +492,22 @@ def coverage(root: Optional[str] = None, n: Optional[int] = None, negatives: int
     rng = np.random.RandomState(seed)
     order = list(rng.permutation(ids))
     samples: List[SpliceSample] = []
-    for i in order[:n if n is not None else len(order)]:
+    used = []
+    for i in order:
+        if n is not None and len(samples) >= n:
+            break
         original, forged = _read_rgb(base / f"{i}.tif"), _read_rgb(base / f"{i}t.tif")
         if original.shape != forged.shape:
             continue
         mask = _pasted_mask(original, forged)
         if not mask.any():
             continue
+        used.append(i)
         samples.append(SpliceSample(donor=None, tampered=forged, mask=mask,
                                     params={"source": "coverage", "image": f"{i}t.tif", "copy_move": True,
                                             "mask_marks": "copy"}))
-    for i in order[:min(negatives, len(order))]:
+    # Negatives are the originals of the forgeries drawn above, then of the rest.
+    for i in (used + [i for i in order if i not in used])[:negatives]:
         original = _read_rgb(base / f"{i}.tif")
         samples.append(SpliceSample(donor=None, tampered=original, mask=np.zeros(original.shape[:2], bool),
                                     params={"source": "coverage", "image": f"{i}.tif", "negative": True},
@@ -514,8 +521,8 @@ def coverage(root: Optional[str] = None, n: Optional[int] = None, negatives: int
 
 COMOFOD_KAGGLE_REF = "muhammadomerkhan03/comofod-cleaned-dataset"
 # CoMoFoD numbers its cases by what was done to the copy.
-COMOFOD_CATEGORIES = ((1, 40, "translation"), (41, 80, "rotation"), (81, 120, "scaling"),
-                      (121, 160, "distortion"), (161, 200, "combination"))
+# The Kaggle copy holds the first 120.
+COMOFOD_CATEGORIES = ((1, 40, "translation"), (41, 80, "rotation"), (81, 120, "scaling"))
 
 
 def comofod(root: Optional[str] = None, n: Optional[int] = None, negatives: int = 0, seed: int = 0,
@@ -523,9 +530,11 @@ def comofod(root: Optional[str] = None, n: Optional[int] = None, negatives: int 
     """CoMoFoD copy-moves: ``NNN_F.png`` forged, ``NNN_O.png`` original, ``NNN_B.png`` mask.
 
     The mask marks both the copy and where it came from, so it's scored like
-    our own copy-moves. ``category`` picks one of translation, rotation,
-    scaling, distortion, combination (``params["category"]`` either way).
-    Originals are the negatives.
+    our own copy-moves. ``category`` picks translation, rotation or scaling
+    (``params["category"]`` either way). Originals are the negatives, first
+    those of the forgeries drawn. Note the originals of some rotation and
+    scaling cases differ slightly everywhere from their forgeries (the
+    forgery was resampled as a whole); as standalone negatives that's fine.
     """
     base = Path(root) if root else data_dir() / "comofod"
     ids = sorted(int(p.name[:3]) for p in base.glob("[0-9][0-9][0-9]_F.png"))
@@ -534,17 +543,23 @@ def comofod(root: Optional[str] = None, n: Optional[int] = None, negatives: int 
     kind = {i: name for lo, hi, name in COMOFOD_CATEGORIES for i in range(lo, hi + 1)}
     if category is not None:
         ids = [i for i in ids if kind.get(i) == category]
+        if not ids:
+            raise ValueError(f"no CoMoFoD cases of category {category!r} under {base}")
     order = list(np.random.RandomState(seed).permutation(ids))
     samples: List[SpliceSample] = []
-    for i in order[:n if n is not None else len(order)]:
+    used = []
+    for i in order:
+        if n is not None and len(samples) >= n:
+            break
         forged = _read_rgb(base / f"{i:03d}_F.png")
         mask = np.asarray(Image.open(base / f"{i:03d}_B.png").convert("L")) > 127
         if mask.shape != forged.shape[:2] or not mask.any():
             continue
+        used.append(i)
         samples.append(SpliceSample(donor=None, tampered=forged, mask=mask,
                                     params={"source": "comofod", "image": f"{i:03d}_F.png", "copy_move": True,
                                             "category": kind.get(i, "unknown")}))
-    for i in order[:min(negatives, len(order))]:
+    for i in (used + [i for i in order if i not in used])[:negatives]:
         original = _read_rgb(base / f"{i:03d}_O.png")
         samples.append(SpliceSample(donor=None, tampered=original, mask=np.zeros(original.shape[:2], bool),
                                     params={"source": "comofod", "image": f"{i:03d}_O.png", "negative": True,

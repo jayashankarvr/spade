@@ -122,6 +122,21 @@ class TestCoverage:
         truth[50:80, 80:116] = True
         assert (mask & truth).sum() / (mask | truth).sum() > 0.9
 
+    def test_low_contrast_paste_is_fully_marked(self):
+        # COVERAGE pastes objects over similar ones, so many pixels change by
+        # only a few grey levels. They are still the copy.
+        original = _texture(4, (96, 128))
+        forged = original.copy()
+        forged[50:80, 80:116] = np.clip(original[50:80, 80:116].astype(int) + 3, 0, 255)
+        mask = _pasted_mask(original, forged)
+        assert mask[50:80, 80:116].mean() > 0.95
+
+    def test_copy_only_masks_report_recall_not_iou(self, tmp_path):
+        records = calibration.score_samples(coverage(root=str(_fake_coverage(tmp_path, n=1))))
+        out = calibration.summary(records)
+        assert np.isnan(out["iou"]) and np.isnan(out["precision"])
+        assert out["recall"] > 0.5
+
     def test_loads_forgeries_and_originals(self, tmp_path):
         samples = coverage(root=str(_fake_coverage(tmp_path)), negatives=2)
         assert [s.label for s in samples] == [1, 1, 0, 0]
@@ -151,6 +166,11 @@ class TestComofod:
         assert sorted(s.params["category"] for s in everything if s.label == 1) == ["rotation", "translation"]
         rotation = comofod(root=str(tmp_path), category="rotation")
         assert [s.params["image"] for s in rotation] == ["045_F.png"]
+        with pytest.raises(ValueError):
+            comofod(root=str(tmp_path), category="scaling")
+        # Negatives are the originals of the forgeries drawn first.
+        one = comofod(root=str(tmp_path), n=1, negatives=1)
+        assert one[1].params["image"] == one[0].params["image"].replace("_F", "_O")
 
 
 class TestCalibration:

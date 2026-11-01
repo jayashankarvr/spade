@@ -41,6 +41,7 @@ class SampleRecord:
     mask: np.ndarray = None          # predicted localization at the engine's max_nfa
     gt_mask: np.ndarray = None
     seconds: float = 0.0
+    marks_copy_only: bool = False    # gt_mask marks the pasted copy but not its source
 
     @property
     def score(self) -> float:
@@ -76,7 +77,9 @@ def score_samples(samples: Sequence, config=None, progress: bool = False) -> Lis
             footprint = localize_region(region.matches, shape, largest_component=False).mask
             if sample.donor is None and marks_copy_only:
                 # The mask marks the pasted copy but not its original: a region
-                # is right if either of its two halves lands on the copy.
+                # is right if either of its two halves lands on the copy. Without
+                # the source mask, a region pairing the copy with a look-alike
+                # rather than its true source also counts.
                 halves = (footprint, _target_footprint(region, shape))
                 hit = any((h & sample.mask).sum() / max(h.sum(), 1) >= HIT_OVERLAP for h in halves)
                 regions.append(RegionRecord(float(region.log10_nfa), bool(hit)))
@@ -91,6 +94,7 @@ def score_samples(samples: Sequence, config=None, progress: bool = False) -> Lis
             mask=result.localization.mask,
             gt_mask=sample.mask,
             seconds=time.perf_counter() - start,
+            marks_copy_only=marks_copy_only,
         ))
         if progress and (i % 10 == 0 or i == len(samples)):
             elapsed = time.perf_counter() - t0
@@ -145,9 +149,16 @@ def calibration_table(records: Sequence[SampleRecord], epsilons=EPSILONS) -> Lis
 
 
 def summary(records: Sequence[SampleRecord]) -> Dict[str, float]:
-    """Localization metrics (positives) and detection AUC (all), like ``runner.evaluate``."""
+    """Localization metrics (positives) and detection AUC (all), like ``runner.evaluate``.
+
+    When the ground truth marks only the pasted copy (``marks_copy_only``),
+    SPADE's mask covering both copies would cap IoU and precision near 0.5,
+    so only recall (how much of the copy is covered) is reported for those.
+    """
     positives = [r for r in records if r.label == 1]
     out = aggregate([localization_scores(r.mask, r.gt_mask) for r in positives])
+    if positives and all(r.marks_copy_only for r in positives):
+        out.update(iou=float("nan"), f1=float("nan"), precision=float("nan"), mcc=float("nan"))
     has_negatives = any(r.label == 0 for r in records)
     out["det_auc"] = detection_auc([r.score for r in records], [r.label for r in records]) if has_negatives else float("nan")
     out["sec_per_image"] = float(np.mean([r.seconds for r in records])) if records else float("nan")
