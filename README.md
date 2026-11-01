@@ -181,15 +181,24 @@ search time; `Config(flip_invariant=False)` turns it off.
 
 #### Rotated Copies (experimental)
 
-`Config(rotation_invariant=True)` describes every patch in its own orientation
-(and indexes targets at full size only; it doesn't support the pyramid yet)
-and groups matches by rotation + translation. It finds rotated copies and
-recovers the angle, but on our photo benchmark it catches about two thirds of
-copies rotated by arbitrary angles and takes 5-30 s per image, so it's off by
-default. The limit is the per-patch orientation estimate: on a 5x5 patch it
-scatters by +-20-50 degrees, and neither a wider orientation window (it runs
-past small fragments into host pixels) nor a wider angle tolerance (more
-chance agreement than true matches) helped.
+`Config(rotation_invariant=True)` compares patches as colour samples on rings
+around their centres instead of as squares, and groups matches by rotation +
+translation (it indexes targets at full size only; the pyramid isn't supported
+yet). The ring descriptor doesn't change when a patch turns, and each match's
+angle is measured by aligning the two sets of rings, so no per-patch
+orientation has to be estimated. On 20 photo splices rotated by up to 180
+degrees (plus 20 unrelated pairs) it finds 60% at NFA < 10^-3 with IoU 0.51,
+AUC 0.995 and no false regions, against 50% / 0.34 / 0.84 with the earlier
+design that turned each patch to its own estimated orientation. It's off by
+default because it is slower (about 20 s per 192 px pair) and has limits:
+
+- The rings read about twice the patch width, so a copy narrower than about
+  17 px (patch 5) can't be found.
+- Smooth, gently varying content has little structure around a ring to
+  match on.
+- Within one image, a round object with a radial pattern matches itself
+  turned; regions that turn about a point inside both copies are dropped
+  for that reason.
 
 #### Large Collections
 

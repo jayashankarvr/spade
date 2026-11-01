@@ -269,21 +269,74 @@ class TestConnectedParts:
         assert not engine.match(skimage.astronaut()[:512, :512], return_heatmap=False).significant_regions
 
 
-class TestRingAngles:
-    def test_recovers_a_known_rotation(self):
-        from scipy.ndimage import gaussian_filter, rotate
+class TestRotationMode:
+    """End to end with Config(rotation_invariant=True)."""
 
-        from spade.extraction.orientation import relative_angles, ring_samples
+    # Rings need angular structure: smooth synthetic textures don't have
+    # enough, so these use photo content (scikit-image's sample photos).
+    @staticmethod
+    def _photo(name):
+        skimage = pytest.importorskip("skimage.data")
+        img = getattr(skimage, name)()
+        return np.repeat(img[..., None], 3, axis=2) if img.ndim == 2 else img[..., :3]
 
-        rng = np.random.RandomState(3)
-        gray = gaussian_filter(rng.rand(120, 120), 1.5)
-        turned = rotate(gray, 40, reshape=False, order=1, mode="reflect")
-        c = 59.5
-        pts = np.array([(x, y) for x in range(40, 80, 4) for y in range(40, 80, 4)], float)
-        t = np.radians(40)
-        # scipy turns the content counter-clockwise on screen, which is -40 deg in image (y-down) coordinates.
-        moved = (pts - c) @ np.array([[np.cos(t), np.sin(t)], [-np.sin(t), np.cos(t)]]).T + c
-        half = 2.0
-        a = relative_angles(ring_samples(gray, pts - half, 5), ring_samples(turned, moved - half, 5))
-        err = np.degrees(np.angle(np.exp(1j * (a + t))))
-        assert np.median(np.abs(err)) < 3
+    def test_rotated_splice_found_with_its_turn(self):
+        from PIL import Image
+
+        donor, host = self._photo("astronaut")[100:260, 100:260], self._photo("coffee")[100:260, 100:260]
+        window = self._photo("astronaut")[130:210, 130:210]
+        tampered = host.copy()
+        tampered[60:108, 50:98] = np.asarray(Image.fromarray(window).rotate(50, resample=Image.BICUBIC))[16:64, 16:64]
+        mask = np.zeros(tampered.shape[:2], bool)
+        mask[60:108, 50:98] = True
+        engine = ForensicsEngine(Config(rotation_invariant=True, flip_invariant=False))
+        engine.index_target(donor, "d")
+        result = engine.match(tampered, return_heatmap=False)
+        assert result.significant_regions
+        # The region's turn is PIL's angle (PIL turns content counter-clockwise on screen).
+        turn = np.degrees(result.significant_regions[0].rotation)
+        assert abs((turn - 50 + 180) % 360 - 180) < 5
+        # Regions cover the rings' footprint, so they reach close to the fragment's edges.
+        assert _iou(result.localization.mask, mask) > 0.6
+
+    @pytest.mark.xfail(reason="copy-move's repeated-texture guard compares translation offsets, "
+                              "which a rotated copy spreads out; being worked on", strict=False)
+    def test_rotated_copy_move_found(self):
+        from PIL import Image
+
+        image = self._photo("astronaut")[80:272, 80:272].copy()
+        window = image[10:90, 10:90]
+        image[120:168, 120:168] = np.asarray(Image.fromarray(window).rotate(70, resample=Image.BICUBIC))[16:64, 16:64]
+        result = ForensicsEngine(Config(rotation_invariant=True)).match_self(image)
+        assert result.significant_regions
+
+    def test_round_object_turning_onto_itself_is_not_a_copy(self):
+        rng = np.random.RandomState(0)
+        yy, xx = np.mgrid[:200, :200]
+        r = np.hypot(xx - 100, yy - 100)
+        profile = np.interp(r, np.arange(0, 80, 4), rng.rand(20))
+        img = np.where(r < 70, profile, 0.5)[..., None] * np.array([0.9, 0.8, 0.7]) + rng.normal(0, 0.01, (200, 200, 3))
+        img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+        assert not ForensicsEngine(Config(rotation_invariant=True)).match_self(img).significant_regions
+
+    def test_unrelated_pair_stays_quiet(self):
+        negative = make_negative_pair(seed=203)
+        engine = ForensicsEngine(Config(rotation_invariant=True))
+        engine.index_target(negative.donor, "d")
+        assert not engine.match(negative.tampered, return_heatmap=False).significant_regions
+
+    def test_bundle_from_another_descriptor_is_refused(self, tmp_path):
+        from spade.exceptions import IndexStoreError
+
+        engine = ForensicsEngine(Config(rotation_invariant=True))
+        engine.index_target(make_negative_pair(seed=204).donor, "d")
+        engine.save(str(tmp_path / "rot"))
+        assert ForensicsEngine.load(str(tmp_path / "rot")).config.rotation_invariant
+        meta = tmp_path / "rot.engine.json"
+        import json
+
+        state = json.loads(meta.read_text())
+        state["descriptor"] = "LuminanceDescriptor"   # what an older rotation-mode bundle used
+        meta.write_text(json.dumps(state))
+        with pytest.raises(IndexStoreError):
+            ForensicsEngine.load(str(tmp_path / "rot"))

@@ -21,8 +21,8 @@ class Match:
     color_b: Optional[np.ndarray] = None
     # Pyramid level the target patch came from (1.0 = full resolution).
     target_scale: float = 1.0
-    # Target patch orientation minus source patch orientation, radians
-    # (rotation-invariant mode only).
+    # Rotation-invariant mode: the measured turn from source to target, radians,
+    # with target = R(rotation) @ source about the patch centres.
     rotation: float = 0.0
     # Found by searching the horizontally mirrored source (flip-invariant mode).
     mirrored: bool = False

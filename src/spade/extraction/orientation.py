@@ -10,12 +10,11 @@ circles around its centre (radius 1 out to one patch width, 16 samples each).
   cross-correlation peaks; the target's rings are then read at that angle, so
   the pixel fits compare the pair already aligned.
 
-On rotated, recolored JPEG photo splices this puts the true partner among the
-8 nearest neighbours for 58% of interior source patches, against 36% for the
-earlier approach (each patch resampled in its own intensity-centroid
-orientation, which needed a 10 px disc and ran into host pixels near a
-fragment's edge), and measures the angle within 10 degrees for 99% of true
-matches, against 82%.
+The rings reach patch_size - 1 pixels from the centre, so a patch reads a disc
+of about twice its width and only matches when that disc lies inside the copy:
+fragments narrower than about 17 px (patch 5) can't be found this way. The
+previous approach, resampling each patch in its own intensity-centroid
+orientation, is described in the changelog along with how the two compare.
 """
 
 from __future__ import annotations
@@ -43,7 +42,8 @@ def ring_footprint(patch_size: int) -> int:
 def ring_samples(image: np.ndarray, coords: np.ndarray, patch_size: int,
                  phase: Optional[np.ndarray] = None) -> np.ndarray:
     """Samples on rings around each patch centre: (N, rings, angles) for a grey
-    image, (N, rings, angles, 3) for colour.
+    image, (N, rings, angles, 3) for colour (an (H, W, 3) array, or a tuple of
+    contiguous per-channel planes, which is faster to sample).
 
     ``phase`` (radians, one per patch) turns where each set of rings starts,
     which is how a target is read at a match's measured angle.
@@ -58,11 +58,12 @@ def ring_samples(image: np.ndarray, coords: np.ndarray, patch_size: int,
     xs = cx[:, None, None] + radii[None, :, None] * np.cos(a)[:, None, :]
     ys = cy[:, None, None] + radii[None, :, None] * np.sin(a)[:, None, :]
     shape = (len(coords), len(radii), RING_ANGLES)
-    if image.ndim == 2:
+    if not isinstance(image, (list, tuple)) and image.ndim == 2:
         return map_coordinates(image, [ys.ravel(), xs.ravel()], order=1, mode="nearest").reshape(shape)
-    out = np.empty(shape + (image.shape[2],), dtype=np.float32)
-    for c in range(image.shape[2]):
-        out[..., c] = map_coordinates(image[..., c], [ys.ravel(), xs.ravel()], order=1, mode="nearest").reshape(shape)
+    planes = image if isinstance(image, (list, tuple)) else [image[..., c] for c in range(image.shape[2])]
+    out = np.empty(shape + (len(planes),), dtype=np.float32)
+    for c, plane in enumerate(planes):
+        out[..., c] = map_coordinates(plane, [ys.ravel(), xs.ravel()], order=1, mode="nearest").reshape(shape)
     return out
 
 

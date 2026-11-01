@@ -231,8 +231,9 @@ class Config:
     ivf_nprobe: int = field(default_factory=lambda: _env_int("SPADE_IVF_NPROBE", 16, min_val=1))
     # ivfpq trains once this many patches are indexed; until then search is exact.
     ivf_train_size: int = field(default_factory=lambda: _env_int("SPADE_IVF_TRAIN_SIZE", 50_000, min_val=1000))
-    # Match copies at any rotation: patches are described in their own
-    # orientation and regions are rigid transforms instead of translations.
+    # Match copies at any rotation: patches are compared as rings around their
+    # centres (spade.extraction.orientation) and regions are rigid transforms
+    # instead of translations.
     rotation_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_ROTATION_INVARIANT", False))
     # Also search the mirrored source, so horizontally flipped copies are found
     # (vertical flips too, together with rotation_invariant).
@@ -331,6 +332,7 @@ class _Target:
     level_coords: Optional[np.ndarray] = None  # (N, 2) (x, y) in its pyramid level
     scales: Optional[np.ndarray] = None        # (N,) pyramid scale of each patch
     jpeg_sigma: float = 0.0                    # rounding-error std of the file it came from
+    ring_planes: Optional[Tuple[np.ndarray, ...]] = None  # rotation mode: float32 colour planes, made once
 
 
 @dataclass
@@ -455,8 +457,11 @@ class ForensicsEngine:
         """
         size = self.config.patch_size
         if self.config.rotation_invariant:
-            image = target.levels[1.0].astype(np.float32) / 255.0
-            return ring_samples(image, target.level_coords[idx], size, phase=angles)
+            if target.ring_planes is None:
+                level = target.levels[1.0]
+                target.ring_planes = tuple(np.ascontiguousarray(level[..., c], dtype=np.float32) / 255.0
+                                           for c in range(level.shape[2]))
+            return ring_samples(target.ring_planes, target.level_coords[idx], size, phase=angles)
         out = np.empty((len(idx), size, size, 3), dtype=np.float32)
         scales = target.scales[idx]
         for scale in np.unique(scales):
@@ -663,7 +668,9 @@ class ForensicsEngine:
         Mirrored matches whose two halves touch side by side are dropped: that
         is a symmetric object (a face, a facade, the rim of a round photo)
         meeting its own mirror axis, not a pasted copy. A mirrored copy pasted
-        right against its source is missed as a result.
+        right against its source is missed as a result. In rotation mode,
+        regions that turn about a point inside both copies are dropped too: a
+        round object with a radial pattern matching itself turned.
         """
         engine = ForensicsEngine(dataclasses.replace(self.config, pyramid_enabled=False, max_targets=None))
         engine._self_min_offset = min_offset if min_offset is not None else 2 * self.config.patch_size
@@ -671,7 +678,8 @@ class ForensicsEngine:
         engine.index_target(image, "self", jpeg_sigma=jpeg_sigma)
         result = engine.match(image, return_heatmap=False, jpeg_sigma=jpeg_sigma)
         result.coherent_regions = [
-            r for r in result.coherent_regions if not (r.mirrored and _halves_touch(r, engine._self_min_offset))
+            r for r in result.coherent_regions
+            if not (r.mirrored and _halves_touch(r, engine._self_min_offset)) and not _turns_onto_itself(r)
         ]
         shape = image.shape[:2]
         both = np.zeros(shape, dtype=bool)
@@ -750,16 +758,18 @@ class ForensicsEngine:
                 t_chunk = tgt_idx[start:start + _FIT_CHUNK]
                 tgt_chunk = self._target_patches(target, t_chunk)
                 angles = np.zeros(len(t_chunk))
+                free = 2   # gain and offset
                 if self.config.rotation_invariant:
                     # Measure each pair's turn, then read the target's rings at it.
-                    angles = relative_angles(src_grey[s_chunk].reshape(luminance(tgt_chunk).shape),
-                                             luminance(tgt_chunk))
+                    tgt_grey = luminance(tgt_chunk)
+                    angles = relative_angles(src_grey[s_chunk].reshape(tgt_grey.shape), tgt_grey)
                     tgt_chunk = self._target_patches(target, t_chunk, angles)
+                    free = 3   # and the angle
                 usable = src_unclipped[s_chunk] & _unclipped(tgt_chunk)
                 rss = fit_gain_offset_batch(
                     src_grey[s_chunk], luminance(tgt_chunk).reshape(len(t_chunk), -1), usable,
                 )
-                prob = noise.compute(rss, usable.sum(axis=1) - 2)
+                prob = noise.compute(rss, usable.sum(axis=1) - free)
                 ok = np.nonzero(prob >= self.config.min_probability)[0]
                 s_ok, t_ok = s_chunk[ok], t_chunk[ok]
                 parts.append({
@@ -791,7 +801,11 @@ class ForensicsEngine:
         groups = cols["owner"] * (len(np.unique(scale)) + 1) + scale_idx
         ids = np.array(list(image_ids) + [""], dtype=object)[cols["owner"]] if len(scale) else np.zeros(0, object)
 
-        matches = MatchList(self.config.patch_size, cols["src_xy"], cols["tgt_xy"], cols["prob"], ids,
+        # In rotation mode a patch reads a disc wider than its square, so matches
+        # carry that footprint (top-left of the disc) for boxes, heatmaps and masks.
+        footprint = self._footprint()
+        shift = (footprint - self.config.patch_size) // 2
+        matches = MatchList(footprint, cols["src_xy"] - shift, cols["tgt_xy"] - shift, cols["prob"], ids,
                             scale, cols["rotation"])
         return _Candidates(
             src_idx=cols["src_idx"], tgt_idx=cols["tgt_idx"], prob=cols["prob"], offsets=offsets,
@@ -909,11 +923,15 @@ class ForensicsEngine:
 
             # k: distinct source positions that agree; n: source positions tested in that area.
             k = len({m.source_coord for m in inliers})
+            # The box spans the matches' footprints; count the patch positions inside it.
+            footprint = self._footprint()
+            shift = (footprint - cfg.patch_size) // 2
             x0, y0, w, h = region.source_bbox
-            last_x, last_y = x0 + w - cfg.patch_size, y0 + h - cfg.patch_size
+            first_x, first_y = x0 + shift, y0 + shift
+            last_x, last_y = x0 + w - footprint + shift, y0 + h - footprint + shift
             in_box = (
-                (src_coords[:, 0] >= x0) & (src_coords[:, 0] <= last_x)
-                & (src_coords[:, 1] >= y0) & (src_coords[:, 1] <= last_y)
+                (src_coords[:, 0] >= first_x) & (src_coords[:, 0] <= last_x)
+                & (src_coords[:, 1] >= first_y) & (src_coords[:, 1] <= last_y)
             )
             n = max(int(in_box.sum()), k)
             n_target = max(self.index.count(image_id), 1)
@@ -993,6 +1011,7 @@ class ForensicsEngine:
         state = {
             "version": _BUNDLE_VERSION,
             "config": self.config.to_dict(),
+            "descriptor": type(self.descriptor).__name__,
             "targets": [
                 [image_id, t.path, t.shape[0], t.shape[1], t.jpeg_sigma] for image_id, t in self._targets.items()
             ],
@@ -1022,6 +1041,11 @@ class ForensicsEngine:
         }
         overrides = {k: v for k, v in config_overrides.items() if k not in frozen}
         engine = cls(Config.from_dict(state["config"], **overrides))
+        # Bundles from before the descriptor was recorded used the luminance one.
+        saved = state.get("descriptor", "LuminanceDescriptor")
+        if saved != type(engine.descriptor).__name__:
+            raise IndexStoreError(f"bundle was indexed with {saved}, this version uses "
+                                  f"{type(engine.descriptor).__name__} for that config; re-index the images")
         index = ANNIndex.load(path)
         if index.dim != engine.descriptor.dim:
             raise IndexStoreError(f"index dim {index.dim} doesn't match descriptor dim {engine.descriptor.dim}")
@@ -1140,6 +1164,25 @@ def _connected_parts(rows: np.ndarray, xy: np.ndarray, gap: int) -> List[np.ndar
     order = np.argsort(which, kind="stable")
     bounds = np.cumsum(np.bincount(which)[1:])[:-1]
     return np.split(rows[order], bounds)
+
+
+def _turns_onto_itself(region, min_turn: float = np.radians(10)) -> bool:
+    """A rotated self-match whose turn pivots on a point inside both of its boxes.
+
+    A real copy-move moves the copy somewhere else, so the pivot of the
+    rigid transform lies between the two copies. A rotationally symmetric
+    object matching itself turned has its pivot at its own centre.
+    """
+    if region.mirrored or abs(region.rotation) < min_turn:
+        return False
+    c, s = np.cos(region.rotation), np.sin(region.rotation)
+    pivot = np.linalg.solve(np.eye(2) - np.array([[c, -s], [s, c]]), np.asarray(region.offset, dtype=np.float64))
+
+    def inside(box):
+        x, y, w, h = box
+        return x <= pivot[0] <= x + w and y <= pivot[1] <= y + h
+
+    return inside(region.source_bbox) and inside(region.target_bbox)
 
 
 def _halves_touch(region, max_gap: int, max_shift: int = 2) -> bool:
