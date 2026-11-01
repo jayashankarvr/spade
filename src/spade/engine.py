@@ -44,7 +44,7 @@ from spade.exceptions import (
     TargetExistsError,
 )
 from spade.extraction.patches import PatchExtractor, max_entropy
-from spade.extraction.orientation import canonical_patches, patch_orientations, relative_angles, ring_samples
+from spade.extraction.orientation import RingDescriptor, relative_angles, ring_footprint, ring_samples
 from spade.extraction.pyramid import ImagePyramid
 from spade.jpeg import quantization_sigma
 from spade.logging_config import get_logger
@@ -331,7 +331,6 @@ class _Target:
     level_coords: Optional[np.ndarray] = None  # (N, 2) (x, y) in its pyramid level
     scales: Optional[np.ndarray] = None        # (N,) pyramid scale of each patch
     jpeg_sigma: float = 0.0                    # rounding-error std of the file it came from
-    thetas: Optional[np.ndarray] = None        # (N,) patch orientations (rotation-invariant mode)
 
 
 @dataclass
@@ -365,7 +364,10 @@ class ForensicsEngine:
             stride=self.config.stride,
             entropy_threshold=self.config.entropy_threshold,
         )
-        self.descriptor = LuminanceDescriptor(self.config.patch_size)
+        # Rotation mode describes rings around each patch centre instead of the
+        # square (spade.extraction.orientation).
+        self.descriptor = (RingDescriptor(self.config.patch_size) if self.config.rotation_invariant
+                           else LuminanceDescriptor(self.config.patch_size))
         self.index = ANNIndex(dim=self.descriptor.dim, kind=self.config.index_type,
                               train_size=self.config.ivf_train_size, nprobe=self.config.ivf_nprobe)
         self.verifier = AffineVerifier(noise_sigma=self.config.noise_sigma)
@@ -434,50 +436,50 @@ class ForensicsEngine:
             target = _Target(
                 shape=shape, path=None, levels={s: _to_uint8(img) for s, img in levels.items()},
                 coords=pyr.original_coords[keep], level_coords=pyr.coords[keep],
-                scales=pyr.scales[keep], thetas=np.zeros(int(keep.sum())),
+                scales=pyr.scales[keep],
             )
             return target, descriptors[keep]
-        _, coords, thetas, descriptors = self._extract(image)
+        _, coords, descriptors = self._extract(image)
         target = _Target(
             shape=shape, path=None, levels={1.0: _to_uint8(image)},
             coords=coords, level_coords=coords,
-            scales=np.ones(len(coords), dtype=np.float32), thetas=thetas,
+            scales=np.ones(len(coords), dtype=np.float32),
         )
         return target, descriptors
 
-    def _target_patches(self, target: _Target, idx: np.ndarray) -> np.ndarray:
-        """Cut the patches for index entries ``idx`` out of the target's stored pixels."""
+    def _target_patches(self, target: _Target, idx: np.ndarray, angles: Optional[np.ndarray] = None) -> np.ndarray:
+        """Cut the patches for index entries ``idx`` out of the target's stored pixels.
+
+        Rotation mode returns ring samples instead, read starting at ``angles``
+        (a match's measured turn) when given. It indexes full resolution only.
+        """
         size = self.config.patch_size
+        if self.config.rotation_invariant:
+            image = target.levels[1.0].astype(np.float32) / 255.0
+            return ring_samples(image, target.level_coords[idx], size, phase=angles)
         out = np.empty((len(idx), size, size, 3), dtype=np.float32)
         scales = target.scales[idx]
         for scale in np.unique(scales):
             sel = np.nonzero(scales == scale)[0]
             level = target.levels[float(scale)]
             coords = target.level_coords[idx[sel]]
-            if self.config.rotation_invariant:
-                image = level.astype(np.float32) / 255.0
-                out[sel] = canonical_patches(image, coords, size, target.thetas[idx[sel]])
-            else:
-                # Select on the uint8 view and convert only those patches; converting
-                # the whole level per call costs ~70 ms on a 12 MP donor.
-                windows = np.lib.stride_tricks.sliding_window_view(level, (size, size, 3))
-                out[sel] = windows[coords[:, 1], coords[:, 0], 0] / np.float32(255.0)
+            # Select on the uint8 view and convert only those patches; converting
+            # the whole level per call costs ~70 ms on a 12 MP donor.
+            windows = np.lib.stride_tricks.sliding_window_view(level, (size, size, 3))
+            out[sel] = windows[coords[:, 1], coords[:, 0], 0] / np.float32(255.0)
         return out
 
     def _extract(self, image: np.ndarray):
-        """Patches, coords, orientations and descriptors at full resolution, flat patches removed.
+        """Patches, coords and descriptors at full resolution, flat patches removed.
 
-        In rotation-invariant mode each patch is resampled in its own canonical
-        orientation, so descriptors and fits compare like with like.
+        In rotation mode the "patches" are ring samples around each patch centre.
         """
         col = self.extractor.extract(image)
         patches, coords = col.patches, col.coords
-        thetas = np.zeros(len(patches))
-        if self.config.rotation_invariant and len(patches):
-            thetas = patch_orientations(image, coords, self.config.patch_size)
-            patches = canonical_patches(image, coords, self.config.patch_size, thetas)
+        if self.config.rotation_invariant:
+            patches = ring_samples(image, coords, self.config.patch_size)
         descriptors, keep = self.descriptor.compute_batch(patches)
-        return patches[keep], coords[keep], thetas[keep], descriptors[keep]
+        return patches[keep], coords[keep], descriptors[keep]
 
     def _evict_lru_if_needed(self) -> None:
         if self.config.max_targets is None:
@@ -556,7 +558,7 @@ class ForensicsEngine:
     def _match_once(self, source_image, target_ids, return_heatmap, jpeg_sigma, mirror_width=None) -> MatchResult:
         """One search pass. ``mirror_width``: the source was mirrored about an image this wide."""
         source_shape = (int(source_image.shape[0]), int(source_image.shape[1]))
-        src_patches, src_coords, src_thetas, descriptors = self._extract(source_image)
+        src_patches, src_coords, descriptors = self._extract(source_image)
 
         if len(src_patches) == 0 or self.index.size == 0:
             return MatchResult(
@@ -564,9 +566,8 @@ class ForensicsEngine:
                 localization=localize_region([], source_shape),
             )
 
-        src_gray = source_image @ LUMA if self.config.rotation_invariant else None
         candidates, verified_per_target = self._verified_candidates(
-            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma, mirror_width, src_gray
+            src_patches, src_coords, descriptors, target_ids, jpeg_sigma, mirror_width
         )
         matches = candidates.matches
 
@@ -701,8 +702,8 @@ class ForensicsEngine:
         sigma = np.sqrt(self.config.noise_sigma ** 2 + source_jpeg_sigma ** 2 + target_sigma ** 2)
         return ProbabilityModel(noise_sigma=float(sigma))
 
-    def _verified_candidates(self, src_patches, src_coords, src_thetas, descriptors, target_ids,
-                             jpeg_sigma=0.0, mirror_width=None, src_gray=None):
+    def _verified_candidates(self, src_patches, src_coords, descriptors, target_ids,
+                             jpeg_sigma=0.0, mirror_width=None):
         """k-NN search plus the per-patch chi-square pre-filter, vectorized."""
         k = self.config.k_neighbors
         if self._self_min_offset is not None:
@@ -733,9 +734,6 @@ class ForensicsEngine:
             sel = owners == owner
             src_idx, tgt_idx = rows[sel], tgt_all[sel]
             noise = self._noise_model(image_id, jpeg_sigma)
-            # Rotation mode: each match's angle comes from the rings around the
-            # two patches (rotation mode indexes full resolution only).
-            tgt_gray = (target.levels[1.0].astype(np.float32) / 255.0) @ LUMA if src_gray is not None else None
             if self._self_min_offset is not None:
                 source_xy = src_coords[src_idx].copy()
                 if mirror_width is not None:  # judge distance and direction in original coordinates
@@ -751,6 +749,12 @@ class ForensicsEngine:
                 s_chunk = src_idx[start:start + _FIT_CHUNK]
                 t_chunk = tgt_idx[start:start + _FIT_CHUNK]
                 tgt_chunk = self._target_patches(target, t_chunk)
+                angles = np.zeros(len(t_chunk))
+                if self.config.rotation_invariant:
+                    # Measure each pair's turn, then read the target's rings at it.
+                    angles = relative_angles(src_grey[s_chunk].reshape(luminance(tgt_chunk).shape),
+                                             luminance(tgt_chunk))
+                    tgt_chunk = self._target_patches(target, t_chunk, angles)
                 usable = src_unclipped[s_chunk] & _unclipped(tgt_chunk)
                 rss = fit_gain_offset_batch(
                     src_grey[s_chunk], luminance(tgt_chunk).reshape(len(t_chunk), -1), usable,
@@ -762,11 +766,7 @@ class ForensicsEngine:
                     "src_idx": s_ok, "tgt_idx": t_ok, "prob": prob[ok].astype(np.float64),
                     "src_xy": src_coords[s_ok], "tgt_xy": target.coords[t_ok],
                     "scale": target.scales[t_ok].astype(np.float64),
-                    "rotation": (
-                        _wrap_angle(relative_angles(ring_samples(src_gray, src_coords[s_ok], self.config.patch_size),
-                                                    ring_samples(tgt_gray, target.coords[t_ok], self.config.patch_size)))
-                        if src_gray is not None else np.zeros(len(ok))
-                    ).astype(np.float64),
+                    "rotation": _wrap_angle(angles[ok]).astype(np.float64),
                     "owner": np.full(len(ok), owner, dtype=np.int64),
                 })
                 verified_per_target[image_id] = verified_per_target.get(image_id, 0) + len(ok)
@@ -802,6 +802,10 @@ class ForensicsEngine:
     # Region-level verification
     # ------------------------------------------------------------------
 
+    def _footprint(self) -> int:
+        """Width of the pixels one patch reads: the square, or the rings' disc in rotation mode."""
+        return ring_footprint(self.config.patch_size) if self.config.rotation_invariant else self.config.patch_size
+
     def _count_tests(self, source_shape, n_source: int, searched: List[str]) -> float:
         """Region hypotheses a search tries: offsets x scales x region seeds, over every target searched.
 
@@ -809,7 +813,7 @@ class ForensicsEngine:
         would understate how hard we looked.
         """
         cfg = self.config
-        overlap = overlap_factor(cfg.patch_size, cfg.stride)
+        overlap = overlap_factor(self._footprint(), cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         n_scales = len(cfg.pyramid_scales) if self.pyramid is not None else 1
         sh, sw = source_shape
@@ -865,7 +869,7 @@ class ForensicsEngine:
         # originals it flagged 12-28% of untouched photos.
         if self._self_min_offset is None:
             src_xy = src_coords[candidates.src_idx]
-            smallest = max(cfg.coherence_min_cluster, int(np.ceil(overlap_factor(cfg.patch_size, cfg.stride))))
+            smallest = max(cfg.coherence_min_cluster, int(np.ceil(overlap_factor(self._footprint(), cfg.stride))))
             clusters = [
                 (offset, part, image_id, rotation)
                 for offset, rows, image_id, rotation in clusters
@@ -875,14 +879,15 @@ class ForensicsEngine:
         clusters.sort(key=lambda c: len(c[1]), reverse=True)
 
         n_source = len(src_patches)
-        overlap = overlap_factor(cfg.patch_size, cfg.stride)
+        overlap = overlap_factor(self._footprint(), cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         max_log10_nfa = float(np.log10(cfg.max_nfa))
         regions = []
         for offset, rows, image_id, rotation in clusters[:_MAX_REGIONS]:
             target = self._targets[image_id]
             src = src_patches[candidates.src_idx[rows]]
-            tgt = self._target_patches(target, candidates.tgt_idx[rows])
+            tgt = self._target_patches(target, candidates.tgt_idx[rows],
+                                       candidates.matches.rotation[rows] if cfg.rotation_invariant else None)
 
             usable = _usable_pixels(src, tgt)
             M, b = self._fit_region_transform(src, tgt, usable)

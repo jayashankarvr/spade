@@ -6,7 +6,7 @@ import pytest
 from spade import Config, ForensicsEngine
 from spade.aggregation.heatmap import Match
 from spade.bench.synthetic import make_copy_move, make_negative_pair
-from spade.extraction.orientation import canonical_patches, patch_orientations
+from spade.extraction.orientation import RingDescriptor, relative_angles, ring_samples
 from spade.verification.coherence import find_rigid_regions
 
 
@@ -48,20 +48,24 @@ class TestCopyMove:
         assert engine.index.size == 0 and engine.target_count == 0
 
 
-class TestOrientation:
-    def test_exact_rotation_shifts_angle_and_keeps_patch(self):
+class TestRings:
+    def test_exact_rotation_keeps_descriptor_and_measures_angle(self):
         from scipy.ndimage import gaussian_filter
 
         img = gaussian_filter(np.random.RandomState(0).rand(80, 80, 3), (1.5, 1.5, 0)).astype(np.float32)
-        rot = np.ascontiguousarray(np.rot90(img, k=-1))
+        rot = np.ascontiguousarray(np.rot90(img, k=-1))   # a quarter turn clockwise on screen
         s = 5
         coords = np.array([[30, 30], [40, 22], [25, 45]])
         centers = coords + (s - 1) / 2
-        rot_coords = (np.stack([79 - centers[:, 1], centers[:, 0]], 1) - (s - 1) / 2).astype(int)
-        t1 = patch_orientations(img, coords, s)
-        t2 = patch_orientations(rot, rot_coords, s)
-        np.testing.assert_allclose((t2 - t1) % (2 * np.pi), np.pi / 2, atol=1e-6)
-        np.testing.assert_allclose(canonical_patches(img, coords, s, t1), canonical_patches(rot, rot_coords, s, t2), atol=1e-5)
+        rot_coords = np.stack([79 - centers[:, 1], centers[:, 0]], 1) - (s - 1) / 2
+        a, b = ring_samples(img, coords, s), ring_samples(rot, rot_coords, s)
+        desc = RingDescriptor(s)
+        np.testing.assert_allclose(desc.compute_batch(a)[0], desc.compute_batch(b)[0], atol=1e-4)
+        gray = lambda r: r @ np.array([0.299, 0.587, 0.114], np.float32)
+        angle = relative_angles(gray(a), gray(b))
+        np.testing.assert_allclose(np.angle(np.exp(1j * (angle - np.pi / 2))), 0, atol=1e-3)
+        # Read at the measured angle, the target rings line up with the source.
+        np.testing.assert_allclose(ring_samples(rot, rot_coords, s, phase=angle), a, atol=1e-3)
 
 
 class TestRigidClustering:
