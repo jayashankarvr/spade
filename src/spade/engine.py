@@ -940,7 +940,7 @@ class ForensicsEngine:
                 # A chance match must also agree on the angle.
                 p *= _ANGLE_TOLERANCE / np.pi
             if self._self_min_offset is not None:
-                p = max(p, self._competing_offset_rate(candidates, np.nonzero(in_box)[0], offset, image_id))
+                p = max(p, self._competing_offset_rate(candidates, np.nonzero(in_box)[0], offset, image_id, rotation))
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
             region.n_tests = n_tests
@@ -949,7 +949,8 @@ class ForensicsEngine:
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
         return regions
 
-    def _competing_offset_rate(self, candidates, box: np.ndarray, offset, image_id: str) -> float:
+    def _competing_offset_rate(self, candidates, box: np.ndarray, offset, image_id: str,
+                               rotation: float = 0.0) -> float:
         """Share of the region's patches that also agree on the best *other* offset.
 
         Within one image, texture repeats: brick, lattices, grass match
@@ -960,22 +961,53 @@ class ForensicsEngine:
         a region-level version of Lowe's ratio test. Only used for self-matching:
         it cut false regions on real photos ~100x there, while for two-image
         searches it cost recall and bought nothing.
+
+        In rotation mode the competitors are whole rigid transforms: each
+        candidate's turn plus where it takes the region's centre, binned. A
+        rotated copy spreads plain offsets out, so comparing those would make
+        every rotated copy look like repeated texture; with no test at all,
+        edges matching edges at any angle raised alarms on 15 of 40 clean
+        photo crops.
         """
         if len(box) == 0:
             return 0.0
         tol = self.config.coherence_offset_tolerance
-        offsets = candidates.offsets
         rows = np.nonzero(np.isin(candidates.src_idx, box) & (candidates.image_ids == image_id))[0]
         if len(rows) == 0:
             return 0.0
-        far = rows[np.abs(offsets[rows] - np.array(offset)).max(axis=1) > tol + 3]
-        if len(far) == 0:
-            return 0.0
         cell = 2 * tol + 1
-        keys = (offsets[far, 0] // cell) * 1_000_003 + (offsets[far, 1] // cell)
-        # Count each source patch once per offset cell.
-        pairs = np.unique(keys * (int(candidates.src_idx.max()) + 1) + candidates.src_idx[far])
-        _, support = np.unique(pairs // (int(candidates.src_idx.max()) + 1), return_counts=True)
+        if self.config.rotation_invariant:
+            # Where each candidate's rigid transform takes the box centre; the
+            # region's own transform takes it to centre + offset turned.
+            half = (candidates.matches.patch_size - 1) / 2.0
+            src_c = candidates.matches.src_xy[rows] + half
+            tgt_c = candidates.matches.tgt_xy[rows] + half
+            centre = src_c.mean(axis=0)
+            theta = candidates.matches.rotation[rows]
+            cos, sin = np.cos(theta), np.sin(theta)
+            d = src_c - centre
+            # target = R(theta) source + t, so the centre goes to tgt_c - R(theta) d.
+            lands = tgt_c - np.stack([cos * d[:, 0] - sin * d[:, 1], sin * d[:, 0] + cos * d[:, 1]], axis=1)
+            c, s_ = np.cos(rotation), np.sin(rotation)
+            own_lands = np.array([c * centre[0] - s_ * centre[1], s_ * centre[0] + c * centre[1]]) + np.array(offset)
+            turn = np.abs(_wrap_angle(theta - rotation))
+            near = (turn < _ANGLE_TOLERANCE) & (np.abs(lands - own_lands).max(axis=1) <= tol + 3)
+            far = ~near
+            if not far.any():
+                return 0.0
+            angle_bin = np.floor((_wrap_angle(theta[far]) + np.pi) / _ANGLE_TOLERANCE).astype(np.int64)
+            pos = np.floor(lands[far] / cell).astype(np.int64)
+            keys = (angle_bin * 1_000_003 + pos[:, 0]) * 1_000_003 + pos[:, 1]
+            far = rows[far]
+        else:
+            offsets = candidates.offsets
+            far = rows[np.abs(offsets[rows] - np.array(offset)).max(axis=1) > tol + 3]
+            if len(far) == 0:
+                return 0.0
+            keys = (offsets[far, 0] // cell) * 1_000_003 + (offsets[far, 1] // cell)
+        # Count each source patch once per cell.
+        pairs = np.unique(np.stack([keys, candidates.src_idx[far]], axis=1), axis=0)
+        _, support = np.unique(pairs[:, 0], return_counts=True)
         return min(1.0, support.max() / len(box))
 
     def _fit_region_transform(
