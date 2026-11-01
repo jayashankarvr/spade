@@ -656,12 +656,20 @@ class ForensicsEngine:
         a region whose source and target are the two copies; which one is the
         original can't be told from the image alone. ``localization`` covers
         both copies. Doesn't touch this engine's index.
+
+        Mirrored matches whose two halves touch side by side are dropped: that
+        is a symmetric object (a face, a facade, the rim of a round photo)
+        meeting its own mirror axis, not a pasted copy. A mirrored copy pasted
+        right against its source is missed as a result.
         """
         engine = ForensicsEngine(dataclasses.replace(self.config, pyramid_enabled=False, max_targets=None))
         engine._self_min_offset = min_offset if min_offset is not None else 2 * self.config.patch_size
         image = self._normalize_image(image)
         engine.index_target(image, "self", jpeg_sigma=jpeg_sigma)
         result = engine.match(image, return_heatmap=False, jpeg_sigma=jpeg_sigma)
+        result.coherent_regions = [
+            r for r in result.coherent_regions if not (r.mirrored and _halves_touch(r, engine._self_min_offset))
+        ]
         shape = image.shape[:2]
         both = np.zeros(shape, dtype=bool)
         for region in result.significant_regions:
@@ -1069,6 +1077,19 @@ def _resize(image: np.ndarray, scale: float) -> np.ndarray:
 
 def _to_uint8(image: np.ndarray) -> np.ndarray:
     return np.clip(np.round(image * 255.0), 0, 255).astype(np.uint8)
+
+
+def _halves_touch(region, max_gap: int) -> bool:
+    """Source and target boxes sit side by side and mostly share their rows.
+
+    ``max_gap`` is the self-match minimum offset: patches that close to the
+    mirror axis can't match across it, which leaves a gap that wide.
+    """
+    sx, sy, sw, sh = region.source_bbox
+    tx, ty, tw, th = region.target_bbox
+    gap = max(tx - (sx + sw), sx - (tx + tw))
+    shared_rows = min(sy + sh, ty + th) - max(sy, ty)
+    return gap <= max_gap and shared_rows >= 0.5 * min(sh, th)
 
 
 def _wrap_angle(angle):

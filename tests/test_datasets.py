@@ -157,4 +157,4 @@ class TestGeometricVariants:
         assert np.corrcoef(a.ravel(), b.ravel())[0, 1] > 0.85
 
         samples = load("photos", copy_move=True, n=20, negatives=20, crop_size=96, fragment_size=24)
-        assert not any(s.params["photo"] == "grass" for s in samples)
+        assert not any(s.params["photo"] in ("grass", "gravel") for s in samples)

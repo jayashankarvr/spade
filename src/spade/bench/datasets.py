@@ -60,11 +60,13 @@ _PHOTO_NAMES = (
     "immunohistochemistry", "retina", "camera", "brick", "grass", "gravel", "moon",
 )
 # Photos that already contain a duplicated region, so a copy-move test can't
-# treat them as clean. In "grass", parts of the area near the top (x ~288-448)
-# reappear 162 px lower and 3 px right (e.g. rows 47-77 at x 290-376: correlation
-# 0.91). SPADE finds it, and any crop covering both copies was scored as a
-# false alarm.
-_SELF_DUPLICATED = {"grass"}
+# treat them as clean. SPADE finds these, and any crop covering both copies was
+# scored as a false alarm. Found by running match_self on every full photo:
+#   grass:  rows 47-77 at x 290-376 reappear 162 px lower, 3 px right (corr 0.91)
+#   gravel: the strip at y 0-50, x 352-477 reappears 273 px lower, 36 px right
+# (retina also matched, but only its circular rim against its own mirror image;
+# match_self now drops symmetric objects like that.)
+_SELF_DUPLICATED = {"grass", "gravel"}
 
 
 def load_photos() -> Dict[str, np.ndarray]:

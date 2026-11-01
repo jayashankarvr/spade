@@ -179,3 +179,31 @@ class TestQueryScales:
 def test_rotation_alone_turns_the_default_pyramid_off():
     config = Config(rotation_invariant=True)
     assert config.rotation_invariant and not config.pyramid_enabled
+
+
+class TestSymmetricObjects:
+    def _region(self, src, tgt):
+        from spade.verification.coherence import CoherentRegion
+
+        return CoherentRegion(offset=(0, 0), matches=[], source_bbox=src, target_bbox=tgt, confidence=0.0, mirrored=True)
+
+    def test_halves_meeting_at_an_axis_are_a_symmetric_object(self):
+        from spade.engine import _halves_touch
+
+        # Left and right half of a round object: side by side, same rows.
+        assert _halves_touch(self._region((5, 3, 697, 1401), (704, 3, 697, 1401)), 10)
+
+    def test_mirrored_copy_elsewhere_is_kept(self):
+        from spade.engine import _halves_touch
+
+        assert not _halves_touch(self._region((10, 10, 40, 40), (120, 15, 40, 40)), 10)   # far apart
+        assert not _halves_touch(self._region((10, 10, 40, 40), (52, 90, 40, 40)), 10)    # adjacent column, other rows
+
+    def test_symmetric_image_has_no_copy_move(self):
+        rng = np.random.RandomState(0)
+        half = (rng.rand(64, 48, 3) * 255).astype(np.uint8)
+        from scipy.ndimage import gaussian_filter
+
+        half = gaussian_filter(half.astype(float), (1, 1, 0)).astype(np.uint8)
+        symmetric = np.concatenate([half, half[:, ::-1]], axis=1)
+        assert not ForensicsEngine().match_self(symmetric).significant_regions
