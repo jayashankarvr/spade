@@ -385,7 +385,7 @@ def _casia2_copy_moves(tp_dir, gt_dir, au_dir, rng, n, negatives) -> List[Splice
             continue
         samples.append(SpliceSample(donor=None, tampered=tampered, mask=mask,
                                     params={"source": "casia2", "tampered": tp_path.name, "copy_move": True,
-                                            "tampered_path": str(tp_path)}))
+                                            "tampered_path": str(tp_path), "mask_marks": "copy"}))
     au_paths = sorted(p for p in au_dir.iterdir() if p.name.startswith("Au_"))
     for i in rng.choice(len(au_paths), min(negatives, len(au_paths)), replace=False):
         image = _read_rgb(au_paths[i])
@@ -449,7 +449,112 @@ def photos(copy_move: bool = False, **kwargs) -> List[SpliceSample]:
     return photo_copy_moves(**kwargs) if copy_move else photo_splices(**kwargs)
 
 
-SOURCES = {"synthetic": synthetic, "photos": photos, "casia2": casia2, "manifest": manifest}
+# ----------------------------------------------------------------------
+# COVERAGE (Wen et al., ICIP 2016)
+# ----------------------------------------------------------------------
+
+COVERAGE_KAGGLE_REF = "ma7moud3tef/coverage"
+
+
+def _pasted_mask(original: np.ndarray, forged: np.ndarray, min_fraction: float = 0.002) -> np.ndarray:
+    """Where the forged image differs from its original: the pasted copy.
+
+    Small specks (re-encoding noise) are dropped, holes in the copy filled.
+    """
+    from scipy import ndimage
+
+    changed = np.abs(original.astype(np.int16) - forged.astype(np.int16)).max(axis=2) > 12
+    changed = ndimage.binary_closing(ndimage.binary_opening(changed, np.ones((3, 3))), np.ones((5, 5)))
+    labels, n = ndimage.label(changed)
+    if n == 0:
+        return changed
+    sizes = np.bincount(labels.ravel())
+    keep = np.nonzero(sizes >= min_fraction * changed.size)[0]
+    return ndimage.binary_fill_holes(np.isin(labels, keep[keep > 0]))
+
+
+def coverage(root: Optional[str] = None, n: Optional[int] = None, negatives: int = 0,
+             seed: int = 0) -> List[SpliceSample]:
+    """COVERAGE copy-moves: 100 forged images (``Nt.tif``) and their originals (``N.tif``).
+
+    Every original already holds similar-but-genuine objects, the kind that
+    make copy-move detectors raise false alarms, so the originals are the
+    negatives. This copy of the dataset has no masks; the mask is where the
+    forged image differs from its original, which marks the pasted copy but
+    not where it came from (``params["mask_marks"] == "copy"``).
+    """
+    base = Path(root) if root else data_dir() / "coverage"
+    ids = sorted(int(p.stem) for p in base.glob("*.tif") if p.stem.isdigit() and (base / f"{p.stem}t.tif").exists())
+    if not ids:
+        raise FileNotFoundError(f"COVERAGE not found under {base}. Run: python -m spade.bench.download coverage")
+    rng = np.random.RandomState(seed)
+    order = list(rng.permutation(ids))
+    samples: List[SpliceSample] = []
+    for i in order[:n if n is not None else len(order)]:
+        original, forged = _read_rgb(base / f"{i}.tif"), _read_rgb(base / f"{i}t.tif")
+        if original.shape != forged.shape:
+            continue
+        mask = _pasted_mask(original, forged)
+        if not mask.any():
+            continue
+        samples.append(SpliceSample(donor=None, tampered=forged, mask=mask,
+                                    params={"source": "coverage", "image": f"{i}t.tif", "copy_move": True,
+                                            "mask_marks": "copy"}))
+    for i in order[:min(negatives, len(order))]:
+        original = _read_rgb(base / f"{i}.tif")
+        samples.append(SpliceSample(donor=None, tampered=original, mask=np.zeros(original.shape[:2], bool),
+                                    params={"source": "coverage", "image": f"{i}.tif", "negative": True},
+                                    label=0))
+    return samples
+
+
+# ----------------------------------------------------------------------
+# CoMoFoD (Tralic et al., ELMAR 2013), the 120 base cases
+# ----------------------------------------------------------------------
+
+COMOFOD_KAGGLE_REF = "muhammadomerkhan03/comofod-cleaned-dataset"
+# CoMoFoD numbers its cases by what was done to the copy.
+COMOFOD_CATEGORIES = ((1, 40, "translation"), (41, 80, "rotation"), (81, 120, "scaling"),
+                      (121, 160, "distortion"), (161, 200, "combination"))
+
+
+def comofod(root: Optional[str] = None, n: Optional[int] = None, negatives: int = 0, seed: int = 0,
+            category: Optional[str] = None) -> List[SpliceSample]:
+    """CoMoFoD copy-moves: ``NNN_F.png`` forged, ``NNN_O.png`` original, ``NNN_B.png`` mask.
+
+    The mask marks both the copy and where it came from, so it's scored like
+    our own copy-moves. ``category`` picks one of translation, rotation,
+    scaling, distortion, combination (``params["category"]`` either way).
+    Originals are the negatives.
+    """
+    base = Path(root) if root else data_dir() / "comofod"
+    ids = sorted(int(p.name[:3]) for p in base.glob("[0-9][0-9][0-9]_F.png"))
+    if not ids:
+        raise FileNotFoundError(f"CoMoFoD not found under {base}. Run: python -m spade.bench.download comofod")
+    kind = {i: name for lo, hi, name in COMOFOD_CATEGORIES for i in range(lo, hi + 1)}
+    if category is not None:
+        ids = [i for i in ids if kind.get(i) == category]
+    order = list(np.random.RandomState(seed).permutation(ids))
+    samples: List[SpliceSample] = []
+    for i in order[:n if n is not None else len(order)]:
+        forged = _read_rgb(base / f"{i:03d}_F.png")
+        mask = np.asarray(Image.open(base / f"{i:03d}_B.png").convert("L")) > 127
+        if mask.shape != forged.shape[:2] or not mask.any():
+            continue
+        samples.append(SpliceSample(donor=None, tampered=forged, mask=mask,
+                                    params={"source": "comofod", "image": f"{i:03d}_F.png", "copy_move": True,
+                                            "category": kind.get(i, "unknown")}))
+    for i in order[:min(negatives, len(order))]:
+        original = _read_rgb(base / f"{i:03d}_O.png")
+        samples.append(SpliceSample(donor=None, tampered=original, mask=np.zeros(original.shape[:2], bool),
+                                    params={"source": "comofod", "image": f"{i:03d}_O.png", "negative": True,
+                                            "category": kind.get(i, "unknown")},
+                                    label=0))
+    return samples
+
+
+SOURCES = {"synthetic": synthetic, "photos": photos, "casia2": casia2, "coverage": coverage, "comofod": comofod,
+           "manifest": manifest}
 
 
 def load(name: str, **kwargs) -> List[SpliceSample]:

@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from spade.bench import calibration
-from spade.bench.datasets import _split_donor_host, casia2, load, manifest, split_labels
+from spade.bench.datasets import _pasted_mask, _split_donor_host, casia2, comofod, coverage, load, manifest, split_labels
 from spade.bench.runner import main as runner_main
 
 
@@ -99,6 +99,58 @@ class TestManifest:
         samples = manifest(str(tmp_path / "set.csv"))
         assert [s.label for s in samples] == [1, 0]
         assert samples[0].mask.sum() == 64 and not samples[1].mask.any()
+
+
+def _fake_coverage(root, n=2):
+    """COVERAGE layout: N.tif original, Nt.tif with a region copied within the image."""
+    for i in range(1, n + 1):
+        original = _texture(10 + i, (96, 128))
+        forged = original.copy()
+        forged[50:80, 80:116] = original[8:38, 10:46]
+        Image.fromarray(original).save(root / f"{i}.tif")
+        Image.fromarray(forged).save(root / f"{i}t.tif")
+    return root
+
+
+class TestCoverage:
+    def test_mask_is_the_pasted_copy(self):
+        original = _texture(3, (96, 128))
+        forged = original.copy()
+        forged[50:80, 80:116] = original[8:38, 10:46]
+        mask = _pasted_mask(original, forged)
+        truth = np.zeros(mask.shape, bool)
+        truth[50:80, 80:116] = True
+        assert (mask & truth).sum() / (mask | truth).sum() > 0.9
+
+    def test_loads_forgeries_and_originals(self, tmp_path):
+        samples = coverage(root=str(_fake_coverage(tmp_path)), negatives=2)
+        assert [s.label for s in samples] == [1, 1, 0, 0]
+        assert all(s.donor is None for s in samples)
+        assert all(s.params["mask_marks"] == "copy" for s in samples[:2])
+
+    def test_either_half_on_the_copy_counts_as_found(self, tmp_path):
+        # SPADE marks both copies; the mask only the pasted one. That's a hit.
+        samples = coverage(root=str(_fake_coverage(tmp_path, n=1)), negatives=1)
+        records = calibration.score_samples(samples)
+        assert any(reg.on_splice and reg.log10_nfa < 0 for reg in records[0].regions)
+        assert not any(reg.log10_nfa < 0 for reg in records[1].regions)
+
+
+class TestComofod:
+    def test_loads_by_category(self, tmp_path):
+        for i in (3, 45):   # one translation case, one rotation case
+            original = _texture(i, (64, 64))
+            forged = original.copy()
+            forged[30:50, 30:50] = original[5:25, 5:25]
+            mask = np.zeros((64, 64), np.uint8)
+            mask[30:50, 30:50] = mask[5:25, 5:25] = 255
+            Image.fromarray(original).save(tmp_path / f"{i:03d}_O.png")
+            Image.fromarray(forged).save(tmp_path / f"{i:03d}_F.png")
+            Image.fromarray(mask).save(tmp_path / f"{i:03d}_B.png")
+        everything = comofod(root=str(tmp_path), negatives=2)
+        assert sorted(s.params["category"] for s in everything if s.label == 1) == ["rotation", "translation"]
+        rotation = comofod(root=str(tmp_path), category="rotation")
+        assert [s.params["image"] for s in rotation] == ["045_F.png"]
 
 
 class TestCalibration:

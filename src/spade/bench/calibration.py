@@ -71,8 +71,16 @@ def score_samples(samples: Sequence, config=None, progress: bool = False) -> Lis
             result = engine.match(sample.tampered, return_heatmap=False, jpeg_sigma=source_sigma)
         shape = sample.tampered.shape[:2]
         regions = []
+        marks_copy_only = (sample.params or {}).get("mask_marks") == "copy"
         for region in result.coherent_regions:
             footprint = localize_region(region.matches, shape, largest_component=False).mask
+            if sample.donor is None and marks_copy_only:
+                # The mask marks the pasted copy but not its original: a region
+                # is right if either of its two halves lands on the copy.
+                halves = (footprint, _target_footprint(region, shape))
+                hit = any((h & sample.mask).sum() / max(h.sum(), 1) >= HIT_OVERLAP for h in halves)
+                regions.append(RegionRecord(float(region.log10_nfa), bool(hit)))
+                continue
             if sample.donor is None:
                 footprint |= _target_footprint(region, shape)
             inside = (footprint & sample.mask).sum() / max(footprint.sum(), 1)

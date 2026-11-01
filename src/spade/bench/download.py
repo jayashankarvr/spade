@@ -17,11 +17,13 @@ import os
 import sys
 from pathlib import Path
 
-from spade.bench.datasets import CASIA2_KAGGLE_REF, data_dir
+from spade.bench.datasets import CASIA2_KAGGLE_REF, COMOFOD_KAGGLE_REF, COVERAGE_KAGGLE_REF, data_dir
 
 # name -> (kaggle ref, folder, a path that must exist afterwards, minimum files under it)
 DATASETS = {
     "casia2": (CASIA2_KAGGLE_REF, "casia2", "CASIA2/Tp", 5000),
+    "coverage": (COVERAGE_KAGGLE_REF, "coverage", ".", 200),
+    "comofod": (COMOFOD_KAGGLE_REF, "comofod", ".", 480),
 }
 
 

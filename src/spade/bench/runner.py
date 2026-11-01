@@ -116,6 +116,10 @@ def _dataset_kwargs(args) -> Dict:
                         jpeg_quality=args.jpeg, seed=args.seed, copy_move=True, **geometry)
         return dict(n=args.n, negatives=args.negatives, color_grade_strength=args.grade,
                     jpeg_quality=args.jpeg, seed=args.seed, tone_curve_strength=args.curve, **geometry)
+    if args.dataset == "coverage":  # copy-move by nature
+        return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed)
+    if args.dataset == "comofod":
+        return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed, category=args.category)
     if args.dataset == "casia2":
         return dict(root=args.root, n=args.n, negatives=args.negatives, seed=args.seed, copy_move=copy_move)
     return dict(path=args.root)
@@ -123,10 +127,13 @@ def _dataset_kwargs(args) -> Dict:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="SPADE benchmark runner")
-    p.add_argument("--dataset", default="synthetic", choices=["synthetic", "photos", "casia2", "manifest"])
+    p.add_argument("--dataset", default="synthetic", choices=["synthetic", "photos", "casia2", "coverage", "comofod", "manifest"])
     p.add_argument("--task", default="splice", choices=["splice", "copymove"],
                    help="splice: donor image given; copymove: find duplicates within one image")
-    p.add_argument("--root", default=None, help="casia2 folder or manifest CSV path")
+    p.add_argument("--root", default=None, help="dataset folder (casia2, coverage, comofod) or manifest CSV path")
+    p.add_argument("--category", default=None,
+                   choices=["translation", "rotation", "scaling", "distortion", "combination"],
+                   help="comofod only: one kind of copy-move")
     p.add_argument("--n", type=int, default=40, help="number of positive (spliced) samples")
     p.add_argument("--negatives", type=int, default=20, help="number of negative (unrelated) pairs")
     p.add_argument("--image-size", type=int, default=96, help="synthetic only")
@@ -147,7 +154,7 @@ def main(argv=None):
 
     records = calibration.score_samples(samples, progress=True)
     results = {"spade": calibration.summary(records)}
-    if not args.no_baselines and args.task == "splice":
+    if not args.no_baselines and all(s.donor is not None for s in samples):  # the baselines need a donor
         results["rootsift+ransac"] = evaluate(RootSiftRansacDetector(), positives, negatives)
 
     print(f"\nSPADE benchmark | {args.dataset} {args.task} | {len(positives)} pos + {len(negatives)} neg | "
