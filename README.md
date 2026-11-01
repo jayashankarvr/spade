@@ -146,9 +146,18 @@ copies. Repetitive texture (brick, gravel, lattices) matches itself at many
 offsets, so a region only counts when its offset clearly beats every other
 offset its patches support - a region-level ratio test. On 60 recolored
 real-photo copy-moves plus 60 clean crops it reports no false regions at any
-threshold and finds 68-80% of the copies (NFA 1e-4 to 10). Content that really
-is duplicated is still reported: scikit-image's `grass` photo contains a cloned
-strip, and SPADE finds it, so the benchmark leaves that photo out.
+threshold and finds 70-82% of the copies (NFA 1e-4 to 10). Content that really
+is duplicated is still reported: scikit-image's `grass` and `gravel` photos
+each contain a cloned strip, and SPADE finds them, so the benchmark leaves
+those photos out.
+
+Mirrored copies are searched too, which raises a trap: a left-right symmetric
+object (a face, a facade, the round edge of a microscope or fundus photo)
+matches its own mirror image. Its two halves sit side by side on the same
+rows, so mirrored regions shaped like that are dropped. The price is a
+mirrored copy pasted right beside its source at the same height, which looks
+exactly like a symmetric object: 1 of 40 copies in the mirrored copy-move
+benchmark (found at NFA 1e-3: 72.5% -> 70%, still no false regions).
 
 #### JPEG-Aware Noise
 
