@@ -221,8 +221,45 @@ class TestConnectedParts:
         sizes = sorted(len(p) for p in parts)
         assert sizes == [1, 1, 1, len(block)]
 
-    def test_one_piece_stays_whole(self):
+    def test_linking_distance_and_row_ids(self):
         from spade.engine import _connected_parts
 
-        xy = np.array([(x, 20) for x in range(0, 60, 4)])   # a line with 4 px steps
-        assert len(_connected_parts(np.arange(len(xy)), xy, gap=5)) == 1
+        # Cells are gap-sized; points in neighbouring cells link, points two cells apart don't.
+        xy = np.array([(0, 0), (9, 0), (25, 0)])
+        parts = _connected_parts(np.array([7, 8, 9]), xy, gap=5)
+        assert sorted(sorted(p.tolist()) for p in parts) == [[7, 8], [9]]
+
+    def test_copy_with_strays_at_its_offset_is_found(self):
+        # Chance matches far away at the copy's offset used to stretch its box
+        # over the image and hide it.
+        from spade.bench.synthetic import _textured_image
+
+        rng = np.random.RandomState(7)
+        donor, host = _textured_image(rng, 160, 160), _textured_image(rng, 160, 160)
+        tampered = host.copy()
+        tampered[60:90, 70:100] = donor[20:50, 30:60]
+        engine = ForensicsEngine()
+        engine.index_target(donor, "d")
+        result = engine.match(tampered)
+        mask = np.zeros((160, 160), bool)
+        mask[60:90, 70:100] = True
+        assert result.significant_regions
+        assert _iou(result.localization.mask, mask) > 0.5
+
+    def test_copy_move_is_not_split(self, monkeypatch):
+        import spade.engine as eng
+
+        calls = []
+        real = eng._connected_parts
+        monkeypatch.setattr(eng, "_connected_parts", lambda *a: calls.append(1) or real(*a))
+        ForensicsEngine().match_self(make_copy_move(seed=1).tampered)
+        assert not calls
+
+    def test_unrelated_photos_stay_quiet(self):
+        # camera vs astronaut: smooth areas at one offset formed a tight blob
+        # that scored NFA 10^-0.3 before the region-size choice was counted.
+        skimage = pytest.importorskip("skimage.data")
+        camera = np.repeat(skimage.camera()[:512, :512, None], 3, axis=2)
+        engine = ForensicsEngine()
+        engine.index_target(camera, "camera")
+        assert not engine.match(skimage.astronaut()[:512, :512], return_heatmap=False).significant_regions

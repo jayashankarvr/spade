@@ -812,6 +812,12 @@ class ForensicsEngine:
         n_tests = max(n_offsets, 1.0) * max(n_source / overlap, 1.0)
         if cfg.rotation_invariant:
             n_tests *= np.pi / _ANGLE_TOLERANCE  # rotation hypotheses
+        if self._self_min_offset is None:
+            # Cross-image regions are connected parts whose box is drawn around
+            # the patches that agree, so the region's size is picked from the
+            # data too: count about one hypothesis per power-of-two width and
+            # height.
+            n_tests *= np.ceil(np.log2(max(sw, 2))) * np.ceil(np.log2(max(sh, 2)))
         return n_tests
 
     def _significant_regions(self, candidates, src_patches, src_coords, verified_per_target, n_tests, jpeg_sigma):
@@ -832,24 +838,31 @@ class ForensicsEngine:
                 (peak, rows, candidates.image_ids[rows[0]], 0.0)
                 for peak, rows in cluster_offsets(
                     candidates.offsets, candidates.groups, cfg.coherence_offset_tolerance,
-                    cfg.coherence_min_cluster, scores=candidates.prob, limit=_MAX_REGIONS,
+                    cfg.coherence_min_cluster, scores=candidates.prob,
+                    # Clusters are split below, so a compact copy can rank low by total size.
+                    limit=_MAX_REGIONS if self._self_min_offset is not None else 4 * _MAX_REGIONS,
                 )
             ]
         # An offset cluster can hold the copy plus chance matches that happen to
         # share its offset anywhere in the image. Left together, they stretch
         # the region's box over half the image and drown the copy. A copy is
-        # one connected piece, so score each spatially connected part alone.
+        # usually one connected piece, so score each connected part alone (a
+        # copy crossed by a flat band, where no patches are kept, comes out in
+        # pieces with less evidence each). _count_tests pays for choosing the
+        # region size this way. Parts with fewer matches than one patch's
+        # overlap can't reach significance and are dropped.
         # Not for copy-move: within one image, splitting also exposes objects
         # that genuinely repeat (identical printed logos, rows of windows), and
         # nothing here tells those from a copy yet. On CoMoFoD and COVERAGE
         # originals it flagged 12-28% of untouched photos.
         if self._self_min_offset is None:
             src_xy = src_coords[candidates.src_idx]
+            smallest = max(cfg.coherence_min_cluster, int(np.ceil(overlap_factor(cfg.patch_size, cfg.stride))))
             clusters = [
                 (offset, part, image_id, rotation)
                 for offset, rows, image_id, rotation in clusters
                 for part in _connected_parts(rows, src_xy[rows], cfg.patch_size)
-                if len(part) >= cfg.coherence_min_cluster
+                if len(part) >= smallest
             ]
         clusters.sort(key=lambda c: len(c[1]), reverse=True)
 
@@ -1097,7 +1110,7 @@ def _to_uint8(image: np.ndarray) -> np.ndarray:
 
 
 def _connected_parts(rows: np.ndarray, xy: np.ndarray, gap: int) -> List[np.ndarray]:
-    """Split ``rows`` into groups whose positions ``xy`` link up within about ``gap`` pixels.
+    """Split ``rows`` (at least one) into groups whose positions ``xy`` link up within about ``gap`` pixels.
 
     Positions are binned into gap-sized cells and cells touching (8-neighbours)
     are joined, so two patches link when their cells are adjacent: closer than
