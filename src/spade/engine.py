@@ -23,14 +23,16 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
 
-from spade.aggregation.heatmap import Match, SpatialAggregator
+from spade.aggregation.heatmap import Match, MatchList, SpatialAggregator
 from spade.aggregation.localize import Localization, localize_region, mask_to_bbox
 from spade.descriptors.core import LUMA, LuminanceDescriptor, luminance
 from spade.exceptions import (
@@ -49,10 +51,9 @@ from spade.search.index import ANNIndex
 from spade.verification.affine import AffineVerifier, fit_gain_offset_batch
 from spade.verification.coherence import (
     CoherentRegion,
-    SpatialCoherenceVerifier,
+    cluster_offsets,
     find_rigid_regions,
     make_region,
-    match_offset,
 )
 from spade.verification.nfa import log10_nfa, overlap_factor
 from spade.verification.probability import ProbabilityModel
@@ -301,7 +302,7 @@ class Config:
 @dataclass
 class MatchResult:
     """Result from matching source against indexed targets."""
-    matches: List[Match]
+    matches: Sequence[Match]     # a MatchList: list-like, objects made on access
     best_match: Optional[Match]
     heatmap: Optional[np.ndarray]
     coherent_regions: List[CoherentRegion]
@@ -334,10 +335,14 @@ class _Target:
 
 @dataclass
 class _Candidates:
-    """Verified per-patch matches, as parallel arrays (one row per match)."""
+    """Verified per-patch matches, as parallel arrays (one row per match); ``matches[i]`` is row i."""
     src_idx: np.ndarray
     tgt_idx: np.ndarray
-    matches: List[Match]
+    prob: np.ndarray        # per-patch fit p-value
+    offsets: np.ndarray     # (N, 2) target - source, at the target's pyramid level
+    groups: np.ndarray      # one id per (target image, pyramid scale)
+    image_ids: np.ndarray   # target image id per row (object array)
+    matches: MatchList
 
 
 class ForensicsEngine:
@@ -364,10 +369,6 @@ class ForensicsEngine:
                               train_size=self.config.ivf_train_size, nprobe=self.config.ivf_nprobe)
         self.verifier = AffineVerifier(noise_sigma=self.config.noise_sigma)
         self.aggregator = SpatialAggregator(smoothing_sigma=self.config.smoothing_sigma)
-        self.coherence_verifier = SpatialCoherenceVerifier(
-            offset_tolerance=self.config.coherence_offset_tolerance,
-            min_cluster_size=self.config.coherence_min_cluster,
-        )
         self.pyramid: Optional[ImagePyramid] = None
         if self.config.pyramid_enabled:
             self.pyramid = ImagePyramid(
@@ -375,6 +376,7 @@ class ForensicsEngine:
                 min_size=self.config.pyramid_min_size,
             )
         self._targets: "OrderedDict[str, _Target]" = OrderedDict()
+        self._load_lock = threading.Lock()
         # Set only on the private engine match_self builds: search the image
         # against itself, ignoring offsets shorter than this.
         self._self_min_offset: Optional[int] = None
@@ -520,16 +522,27 @@ class ForensicsEngine:
         source_image = self._normalize_image(source_image)
         h, w = source_image.shape[:2]
         scales = [1.0] if self._self_min_offset is not None else sorted(set(self.config.query_scales), reverse=True)
-        passes = []
+        jobs = []
         for scale in scales:
             image = source_image if scale == 1.0 else _resize(source_image, scale)
             if min(image.shape[:2]) < self.config.patch_size:
                 continue
             for mirrored in ([False, True] if self.config.flip_invariant else [False]):
                 query = np.ascontiguousarray(image[:, ::-1]) if mirrored else image
-                result = self._match_once(query, target_ids, False, jpeg_sigma,
-                                          mirror_width=image.shape[1] if mirrored else None)
-                passes.append((result, scale, mirrored, image.shape[1]))
+                jobs.append((query, scale, mirrored, image.shape[1]))
+
+        def run(job):
+            query, scale, mirrored, width = job
+            result = self._match_once(query, target_ids, False, jpeg_sigma, mirror_width=width if mirrored else None)
+            return result, scale, mirrored, width
+
+        # Passes are independent and spend their time in FAISS and NumPy, which
+        # release the GIL, so threads overlap them.
+        if len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                passes = list(pool.map(run, jobs))
+        else:
+            passes = [run(job) for job in jobs]
         if not passes:  # smaller than one patch: the plain pass returns the empty result
             return self._match_once(source_image, target_ids, return_heatmap, jpeg_sigma)
         if len(passes) == 1:
@@ -546,7 +559,7 @@ class ForensicsEngine:
 
         if len(src_patches) == 0 or self.index.size == 0:
             return MatchResult(
-                [], None, None, [], self._stats(len(src_patches), 0, []),
+                MatchList.empty(self.config.patch_size), None, None, [], self._stats(len(src_patches), 0, []),
                 localization=localize_region([], source_shape),
             )
 
@@ -567,7 +580,7 @@ class ForensicsEngine:
         if regions:
             best_match = max(regions[0].matches, key=lambda m: m.probability)
         elif matches:
-            best_match = max(matches, key=lambda m: m.probability)
+            best_match = matches.best()
 
         heatmap = self._heatmap(matches, regions, best_match) if return_heatmap else None
 
@@ -590,7 +603,7 @@ class ForensicsEngine:
         if regions:
             heat_matches = regions[0].matches
         else:
-            heat_matches = [m for m in matches if m.image_id == best_match.image_id]
+            heat_matches = matches.for_image(best_match.image_id)
         return self.aggregator.aggregate(heat_matches, self._targets[best_match.image_id].shape)
 
     def _merge_passes(self, passes, shape, return_heatmap) -> MatchResult:
@@ -600,16 +613,10 @@ class ForensicsEngine:
         test count are multiplied by the number of passes.
         """
         h, w = shape
-        size = self.config.patch_size
         n_passes = float(len(passes))
-        regions, matches = [], []
+        regions = []
         for result, scale, mirrored, pass_width in passes:
-            for m in result.matches:
-                x, y = m.source_coord
-                if mirrored:
-                    x = pass_width - size - x
-                m.source_coord = (int(round(x / scale)), int(round(y / scale)))
-                m.source_scale, m.mirrored = scale, mirrored
+            result.matches.map_to_original(scale, mirrored, pass_width)
             for region in result.coherent_regions:
                 x, y, bw, bh = region.source_bbox
                 if mirrored:
@@ -620,12 +627,10 @@ class ForensicsEngine:
                 region.log10_nfa += float(np.log10(n_passes))
                 region.n_tests *= n_passes
             regions.extend(result.coherent_regions)
-            matches.extend(result.matches)
+        matches = MatchList.concat([result.matches for result, *_ in passes])
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
 
-        best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else (
-            max(matches, key=lambda m: m.probability) if matches else None
-        )
+        best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else matches.best()
         heatmap = self._heatmap(matches, regions, best_match) if return_heatmap else None
         significant = [m for r in regions if r.significant for m in r.matches]
         plain = passes[0][0]
@@ -704,8 +709,11 @@ class ForensicsEngine:
         owners = hits.owner[rows, cols]
         tgt_all = hits.patch_idx[rows, cols]
 
-        src_out, tgt_out, matches = [], [], []
         verified_per_target: Dict[str, int] = {}
+        parts = []  # one dict of row arrays per verified chunk
+        # Per source patch, computed once rather than once per candidate.
+        src_grey = luminance(src_patches).reshape(len(src_patches), -1)
+        src_unclipped = _unclipped(src_patches)
 
         for owner in np.unique(owners):
             image_id = hits.image_ids[owner]
@@ -729,36 +737,49 @@ class ForensicsEngine:
             for start in range(0, len(src_idx), _FIT_CHUNK):
                 s_chunk = src_idx[start:start + _FIT_CHUNK]
                 t_chunk = tgt_idx[start:start + _FIT_CHUNK]
-                src_chunk, tgt_chunk = src_patches[s_chunk], self._target_patches(target, t_chunk)
-                usable = _usable_pixels(src_chunk, tgt_chunk)
+                tgt_chunk = self._target_patches(target, t_chunk)
+                usable = src_unclipped[s_chunk] & _unclipped(tgt_chunk)
                 rss = fit_gain_offset_batch(
-                    luminance(src_chunk).reshape(len(s_chunk), -1),
-                    luminance(tgt_chunk).reshape(len(t_chunk), -1),
-                    usable,
+                    src_grey[s_chunk], luminance(tgt_chunk).reshape(len(t_chunk), -1), usable,
                 )
                 prob = noise.compute(rss, usable.sum(axis=1) - 2)
                 ok = np.nonzero(prob >= self.config.min_probability)[0]
-                for j in ok:
-                    ti = t_chunk[j]
-                    matches.append(Match(
-                        source_coord=(int(src_coords[s_chunk[j], 0]), int(src_coords[s_chunk[j], 1])),
-                        target_coord=(int(target.coords[ti, 0]), int(target.coords[ti, 1])),
-                        patch_size=self.config.patch_size,
-                        probability=float(prob[j]),
-                        image_id=image_id,
-                        target_scale=float(target.scales[ti]),
-                        rotation=float(_wrap_angle(target.thetas[ti] - src_thetas[s_chunk[j]])),
-                    ))
-                src_out.append(s_chunk[ok])
-                tgt_out.append(t_chunk[ok])
+                s_ok, t_ok = s_chunk[ok], t_chunk[ok]
+                parts.append({
+                    "src_idx": s_ok, "tgt_idx": t_ok, "prob": prob[ok].astype(np.float64),
+                    "src_xy": src_coords[s_ok], "tgt_xy": target.coords[t_ok],
+                    "scale": target.scales[t_ok].astype(np.float64),
+                    "rotation": _wrap_angle(target.thetas[t_ok] - src_thetas[s_ok]).astype(np.float64),
+                    "owner": np.full(len(ok), owner, dtype=np.int64),
+                })
                 verified_per_target[image_id] = verified_per_target.get(image_id, 0) + len(ok)
 
-        candidates = _Candidates(
-            src_idx=np.concatenate(src_out) if src_out else np.zeros(0, dtype=np.int64),
-            tgt_idx=np.concatenate(tgt_out) if tgt_out else np.zeros(0, dtype=np.int64),
-            matches=matches,
-        )
+        candidates = self._candidates_from(parts, hits.image_ids)
         return candidates, verified_per_target
+
+    def _candidates_from(self, parts, image_ids) -> _Candidates:
+        """Concatenate the verified chunks and build the Match objects in one pass."""
+        keys = ("src_idx", "tgt_idx", "prob", "src_xy", "tgt_xy", "scale", "rotation", "owner")
+        if parts:
+            cols = {k: np.concatenate([p[k] for p in parts]) for k in keys}
+        else:
+            cols = {k: np.zeros((0, 2) if k.endswith("_xy") else 0) for k in keys}
+            cols.update(src_idx=cols["src_idx"].astype(np.int64), tgt_idx=cols["tgt_idx"].astype(np.int64),
+                        owner=cols["owner"].astype(np.int64))
+        scale = cols["scale"]
+        # Same rounding as match_offset (half to even, like Python's round).
+        level_xy = np.round(cols["tgt_xy"] * scale[:, None]).astype(np.int64)
+        offsets = (level_xy - cols["src_xy"]).astype(np.int64).reshape(-1, 2)
+        scale_idx = np.unique(scale, return_inverse=True)[1].reshape(-1) if len(scale) else np.zeros(0, np.int64)
+        groups = cols["owner"] * (len(np.unique(scale)) + 1) + scale_idx
+        ids = np.array(list(image_ids) + [""], dtype=object)[cols["owner"]] if len(scale) else np.zeros(0, object)
+
+        matches = MatchList(self.config.patch_size, cols["src_xy"], cols["tgt_xy"], cols["prob"], ids,
+                            scale, cols["rotation"])
+        return _Candidates(
+            src_idx=cols["src_idx"], tgt_idx=cols["tgt_idx"], prob=cols["prob"], offsets=offsets,
+            groups=groups, image_ids=ids, matches=matches,
+        )
 
     # ------------------------------------------------------------------
     # Region-level verification
@@ -787,28 +808,33 @@ class ForensicsEngine:
     def _significant_regions(self, candidates, src_patches, src_coords, verified_per_target, n_tests, jpeg_sigma):
         """Cluster, fit one color transform per cluster, keep consistent patches, score by NFA."""
         cfg = self.config
+        # Each cluster: (offset, member rows, image id, rotation).
         if cfg.rotation_invariant:
-            clusters = find_rigid_regions(
-                candidates.matches, cfg.coherence_offset_tolerance, cfg.coherence_min_cluster, _ANGLE_TOLERANCE
-            )
+            row_of = {id(m): i for i, m in enumerate(candidates.matches)}
+            clusters = [
+                (r.offset, np.array([row_of[id(m)] for m in r.matches]), r.image_id, r.rotation)
+                for r in find_rigid_regions(
+                    candidates.matches, cfg.coherence_offset_tolerance, cfg.coherence_min_cluster, _ANGLE_TOLERANCE
+                )
+            ]
         else:
-            clusters = self.coherence_verifier.find_coherent_regions(candidates.matches)
-        clusters.sort(key=lambda r: len(r.matches), reverse=True)
-        row_of = {id(m): i for i, m in enumerate(candidates.matches)}
+            # Biggest first; equal sizes by mean fit p-value (the old confidence order).
+            clusters = [
+                (peak, rows, candidates.image_ids[rows[0]], 0.0)
+                for peak, rows in cluster_offsets(
+                    candidates.offsets, candidates.groups, cfg.coherence_offset_tolerance,
+                    cfg.coherence_min_cluster, scores=candidates.prob, limit=_MAX_REGIONS,
+                )
+            ]
+        clusters.sort(key=lambda c: len(c[1]), reverse=True)
 
         n_source = len(src_patches)
         overlap = overlap_factor(cfg.patch_size, cfg.stride)
         window = (2 * cfg.coherence_offset_tolerance + 1) ** 2
         max_log10_nfa = float(np.log10(cfg.max_nfa))
-        offsets = targets = None
-        if self._self_min_offset is not None:  # the ratio test reads these for every region
-            offsets = np.array([match_offset(m) for m in candidates.matches], dtype=np.int64).reshape(-1, 2)
-            targets = np.array([m.image_id for m in candidates.matches], dtype=object)
-
         regions = []
-        for cluster in clusters[:_MAX_REGIONS]:
-            rows = np.array([row_of[id(m)] for m in cluster.matches])
-            target = self._targets[cluster.image_id]
+        for offset, rows, image_id, rotation in clusters[:_MAX_REGIONS]:
+            target = self._targets[image_id]
             src = src_patches[candidates.src_idx[rows]]
             tgt = self._target_patches(target, candidates.tgt_idx[rows])
 
@@ -818,14 +844,14 @@ class ForensicsEngine:
             # The transform is shared by the region, so each patch keeps one
             # degree of freedom per usable pixel.
             rss = (usable * (residual @ LUMA) ** 2).sum(axis=1)
-            prob = self._noise_model(cluster.image_id, jpeg_sigma).compute(rss, usable.sum(axis=1))
+            prob = self._noise_model(image_id, jpeg_sigma).compute(rss, usable.sum(axis=1))
             consistent = prob >= cfg.min_probability
-            inliers = [m for m, ok in zip(cluster.matches, consistent) if ok]
+            inliers = [candidates.matches[i] for i in rows[consistent]]
             if len(inliers) < cfg.coherence_min_cluster:
                 continue
 
-            region = make_region(cluster.offset, inliers, cluster.image_id)
-            region.rotation = cluster.rotation
+            region = make_region(offset, inliers, image_id)
+            region.rotation = rotation
             region.color_M, region.color_b = M, b
             for m in inliers:
                 m.color_M, m.color_b = M, b
@@ -839,13 +865,13 @@ class ForensicsEngine:
                 & (src_coords[:, 1] >= y0) & (src_coords[:, 1] <= last_y)
             )
             n = max(int(in_box.sum()), k)
-            n_target = max(self.index.count(cluster.image_id), 1)
-            p = min(1.0, verified_per_target[cluster.image_id] / (n_source * n_target) * window)
+            n_target = max(self.index.count(image_id), 1)
+            p = min(1.0, verified_per_target[image_id] / (n_source * n_target) * window)
             if cfg.rotation_invariant:
                 # A chance match must also agree on the angle.
                 p *= _ANGLE_TOLERANCE / np.pi
             if self._self_min_offset is not None:
-                p = max(p, self._competing_offset_rate(candidates, offsets, targets, np.nonzero(in_box)[0], cluster))
+                p = max(p, self._competing_offset_rate(candidates, np.nonzero(in_box)[0], offset, image_id))
             region.log10_nfa = log10_nfa(k / overlap, n / overlap, p, n_tests)
             region.max_log10_nfa = max_log10_nfa
             region.n_tests = n_tests
@@ -854,7 +880,7 @@ class ForensicsEngine:
         regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
         return regions
 
-    def _competing_offset_rate(self, candidates, offsets, targets, box: np.ndarray, cluster) -> float:
+    def _competing_offset_rate(self, candidates, box: np.ndarray, offset, image_id: str) -> float:
         """Share of the region's patches that also agree on the best *other* offset.
 
         Within one image, texture repeats: brick, lattices, grass match
@@ -869,10 +895,11 @@ class ForensicsEngine:
         if len(box) == 0:
             return 0.0
         tol = self.config.coherence_offset_tolerance
-        rows = np.nonzero(np.isin(candidates.src_idx, box) & (targets == cluster.image_id))[0]
+        offsets = candidates.offsets
+        rows = np.nonzero(np.isin(candidates.src_idx, box) & (candidates.image_ids == image_id))[0]
         if len(rows) == 0:
             return 0.0
-        far = rows[np.abs(offsets[rows] - np.array(cluster.offset)).max(axis=1) > tol + 3]
+        far = rows[np.abs(offsets[rows] - np.array(offset)).max(axis=1) > tol + 3]
         if len(far) == 0:
             return 0.0
         cell = 2 * tol + 1
@@ -963,6 +990,13 @@ class ForensicsEngine:
         target = self._targets.get(image_id)
         if target is None or target.levels is not None:
             return target
+        with self._load_lock:  # parallel search passes may ask for the same target
+            return self._reload_target(image_id)
+
+    def _reload_target(self, image_id: str) -> Optional[_Target]:
+        target = self._targets[image_id]
+        if target.levels is not None:
+            return target
         if not target.path or not os.path.exists(target.path):
             logger.warning(f"Can't verify matches against '{image_id}': image file not available")
             return None
@@ -1041,16 +1075,20 @@ def _wrap_angle(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
+def _unclipped(patches: np.ndarray) -> np.ndarray:
+    """(N, P) bool: pixels with no channel at 0 or 1 (one 8-bit level of slack either way)."""
+    flat = patches.reshape(len(patches), -1, 3)
+    return ((flat > 1.0 / 255) & (flat < 254.0 / 255)).all(axis=2)
+
+
 def _usable_pixels(source: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """(N, P) bool: pixel pairs with no channel clipped at 0 or 1 on either side.
+    """(N, P) bool: pixel pairs with no channel clipped on either side.
 
     A recolor that saturates breaks the affine model on exactly those pixels; a
     clipped source channel corrupts every predicted target channel, so the
-    whole pixel pair goes. One 8-bit level of slack either way.
+    whole pixel pair goes.
     """
-    n = len(source)
-    both = np.concatenate([source.reshape(n, -1, 3), target.reshape(n, -1, 3)], axis=2)
-    return ((both > 1.0 / 255) & (both < 254.0 / 255)).all(axis=2)
+    return _unclipped(source) & _unclipped(target)
 
 
 def load_image(path: str) -> np.ndarray:

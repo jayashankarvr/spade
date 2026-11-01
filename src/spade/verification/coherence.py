@@ -1,8 +1,8 @@
 """Group matches into regions that share one translation."""
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -84,44 +84,93 @@ class SpatialCoherenceVerifier:
         """Cluster matches; returns regions sorted by confidence (highest first)."""
         if len(matches) < self.min_cluster_size:
             return []
-
-        groups: Dict[Tuple[str, float], List] = defaultdict(list)
-        for m in matches:
-            groups[(m.image_id, getattr(m, "target_scale", 1.0))].append(m)
-
-        regions = []
-        for (image_id, _), group in groups.items():
-            for offset, cluster in self._cluster_by_offset(group):
-                regions.append(make_region(offset, cluster, image_id))
-
+        group_of: Dict[Tuple[str, float], int] = {}
+        groups = [group_of.setdefault((m.image_id, getattr(m, "target_scale", 1.0)), len(group_of)) for m in matches]
+        offsets = np.array([match_offset(m) for m in matches], dtype=np.int64)
+        regions = [
+            make_region(peak, [matches[i] for i in rows], matches[rows[0]].image_id)
+            for peak, rows in cluster_offsets(offsets, groups, self.offset_tolerance, self.min_cluster_size)
+        ]
         regions.sort(key=lambda r: r.confidence, reverse=True)
         return regions
 
-    def _cluster_by_offset(self, matches: List) -> List[Tuple[Tuple[int, int], List]]:
-        by_offset: Dict[Tuple[int, int], List] = defaultdict(list)
-        for m in matches:
-            by_offset[match_offset(m)].append(m)
 
-        counts = Counter({o: len(ms) for o, ms in by_offset.items()})
-        tol = self.offset_tolerance
-        claimed = set()
-        clusters = []
-        # Ties broken by offset so the result doesn't depend on input order.
-        for peak, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
-            if peak in claimed:
+def cluster_offsets(
+    offsets: np.ndarray, groups: Sequence[int], tol: int, min_size: int,
+    scores: Optional[np.ndarray] = None, limit: Optional[int] = None,
+) -> List[Tuple[Tuple[int, int], np.ndarray]]:
+    """Peak clustering of match offsets, separately within each group.
+
+    Within a group, distinct offsets are visited most common first (ties by
+    offset). Each one not yet claimed takes every unclaimed offset within
+    ``tol`` of it on both axes, provided they hold at least ``min_size``
+    matches between them.
+
+    Works on arrays: offsets become integer cell keys, their neighbours are
+    found with one searchsorted, and offsets whose whole window holds fewer
+    than ``min_size`` matches are skipped before the (cheap) greedy pass.
+
+    Returns ``(peak offset, member rows)`` per cluster, groups in order of
+    first appearance. Members are listed window cell by cell (dx outer, dy
+    inner), input order within a cell.
+
+    With ``limit``, returns only the ``limit`` biggest clusters, biggest first,
+    equal sizes by mean ``scores``. Most clusters are a handful of chance
+    matches, and this skips building their member lists.
+    """
+    offsets = np.asarray(offsets, dtype=np.int64).reshape(-1, 2)
+    groups = np.asarray(groups)
+    if len(offsets) < min_size:
+        return []
+    _, first, group_idx = np.unique(groups, return_index=True, return_inverse=True)
+    d = np.arange(-tol, tol + 1)
+    found = []   # (size, score sum, peak, cell list, per-group cell -> rows lookup)
+    for g in np.argsort(first):
+        rows = np.nonzero(group_idx == g)[0]
+        if len(rows) < min_size:
+            continue
+        off = offsets[rows]
+        # Pad by tol on each side so a neighbour's dy never wraps into another dx.
+        lo = off.min(axis=0) - tol
+        span_y = int(off[:, 1].max() - lo[1]) + tol + 1
+        keys = (off[:, 0] - lo[0]) * span_y + (off[:, 1] - lo[1])
+        cells, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
+        wanted = cells[:, None] + (d[:, None] * span_y + d[None, :]).ravel()[None, :]
+        pos = np.minimum(np.searchsorted(cells, wanted), len(cells) - 1)
+        nbr = np.where(cells[pos] == wanted, pos, -1)
+        support = np.where(nbr >= 0, counts[np.maximum(nbr, 0)], 0).sum(axis=1)
+
+        order = np.lexsort((cells, -counts))
+        order = order[support[order] >= min_size]
+        if len(order) == 0:
+            continue
+        nbr_list, count_list = nbr.tolist(), counts.tolist()
+        claimed = [False] * len(cells)
+        by_cell = rows[np.argsort(inverse, kind="stable")]
+        start = np.concatenate([[0], np.cumsum(counts)]).tolist()
+        cell_score = (np.bincount(inverse.reshape(-1), weights=np.asarray(scores)[rows]).tolist()
+                      if scores is not None else None)
+        lookup = (by_cell, start)
+        for peak in order.tolist():
+            if claimed[peak]:
                 continue
-            window = [
-                (peak[0] + dx, peak[1] + dy)
-                for dx in range(-tol, tol + 1)
-                for dy in range(-tol, tol + 1)
-            ]
-            window = [o for o in window if o in by_offset and o not in claimed]
-            members = [m for o in window for m in by_offset[o]]
-            if len(members) < self.min_cluster_size:
+            window = [c for c in nbr_list[peak] if c >= 0 and not claimed[c]]
+            if sum(count_list[c] for c in window) < min_size:
                 continue
-            claimed.update(window)
-            clusters.append((peak, members))
-        return clusters
+            for c in window:
+                claimed[c] = True
+            px, py = divmod(int(cells[peak]), span_y)
+            size = sum(count_list[c] for c in window)
+            score = sum(cell_score[c] for c in window) if cell_score is not None else 0.0
+            found.append((size, score, (px + int(lo[0]), py + int(lo[1])), window, lookup))
+
+    if limit is not None:
+        rank = sorted(range(len(found)), key=lambda i: (-found[i][0], -found[i][1] / found[i][0]))
+        found = [found[i] for i in rank[:limit]]
+    return [
+        (peak, np.concatenate([by_cell[start[c]:start[c + 1]] for c in window]))
+        for _, _, peak, window, (by_cell, start) in found
+    ]
 
 
 def _wrap(angle: np.ndarray) -> np.ndarray:
