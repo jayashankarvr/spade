@@ -19,6 +19,7 @@ except ImportError:
 from spade import ForensicsEngine, Config, __version__
 from spade.exceptions import DependencyError, TargetExistsError
 from spade.jpeg import sigma_from_tables
+from spade.report import region_offset
 
 # Security limits
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -47,7 +48,7 @@ class MatchInfo(BaseModel):
 
 class CoherentRegionInfo(BaseModel):
     """Information about a coherent region."""
-    offset: MatchCoord
+    offset: Optional[MatchCoord] = None   # null when mirrored or rescaled (see the bboxes)
     image_id: str
     num_matches: int
     confidence: float
@@ -55,6 +56,9 @@ class CoherentRegionInfo(BaseModel):
     significant: bool
     source_bbox: Dict[str, int]
     target_bbox: Dict[str, int]
+    mirrored: bool = False
+    source_scale: float = 1.0
+    rotation_degrees: float = 0.0
 
 
 class MatchResponse(BaseModel):
@@ -363,8 +367,12 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             # Build coherent regions info
             regions_info = []
             for region in result.coherent_regions:
+                offset = region_offset(region)
                 regions_info.append(CoherentRegionInfo(
-                    offset=MatchCoord(x=region.offset[0], y=region.offset[1]),
+                    offset=None if offset is None else MatchCoord(x=offset[0], y=offset[1]),
+                    mirrored=region.mirrored,
+                    source_scale=region.source_scale,
+                    rotation_degrees=round(float(np.degrees(region.rotation)), 2),
                     image_id=region.image_id,
                     num_matches=len(region.matches),
                     confidence=region.confidence,

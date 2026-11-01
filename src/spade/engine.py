@@ -281,7 +281,9 @@ class Config:
         if not self.query_scales or not all(0 < q <= 1 for q in self.query_scales) or 1.0 not in self.query_scales:
             raise ConfigurationError(f"query_scales must be in (0, 1] and include 1.0, got {self.query_scales}")
         if self.rotation_invariant and self.pyramid_enabled:
-            raise ConfigurationError("rotation_invariant and pyramid_enabled can't be combined yet")
+            # The pyramid is on by default, so asking for rotation alone lands here.
+            logger.warning("rotation_invariant doesn't support the pyramid yet; indexing targets at full size only")
+            self.pyramid_enabled = False
         if self.max_targets is not None and self.max_targets < 1:
             raise ConfigurationError(f"max_targets must be >= 1 or None, got {self.max_targets}")
 
@@ -376,7 +378,6 @@ class ForensicsEngine:
         # Set only on the private engine match_self builds: search the image
         # against itself, ignoring offsets shorter than this.
         self._self_min_offset: Optional[int] = None
-        self._mirror_width: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Indexing
@@ -448,13 +449,16 @@ class ForensicsEngine:
         scales = target.scales[idx]
         for scale in np.unique(scales):
             sel = np.nonzero(scales == scale)[0]
-            image = target.levels[float(scale)].astype(np.float32) / 255.0
+            level = target.levels[float(scale)]
             coords = target.level_coords[idx[sel]]
             if self.config.rotation_invariant:
+                image = level.astype(np.float32) / 255.0
                 out[sel] = canonical_patches(image, coords, size, target.thetas[idx[sel]])
             else:
-                windows = np.lib.stride_tricks.sliding_window_view(image, (size, size, 3))
-                out[sel] = windows[coords[:, 1], coords[:, 0], 0]
+                # Select on the uint8 view and convert only those patches; converting
+                # the whole level per call costs ~70 ms on a 12 MP donor.
+                windows = np.lib.stride_tricks.sliding_window_view(level, (size, size, 3))
+                out[sel] = windows[coords[:, 1], coords[:, 0], 0] / np.float32(255.0)
         return out
 
     def _extract(self, image: np.ndarray):
@@ -523,20 +527,22 @@ class ForensicsEngine:
                 continue
             for mirrored in ([False, True] if self.config.flip_invariant else [False]):
                 query = np.ascontiguousarray(image[:, ::-1]) if mirrored else image
-                result = self._match_once(query, target_ids, return_heatmap, jpeg_sigma,
+                result = self._match_once(query, target_ids, False, jpeg_sigma,
                                           mirror_width=image.shape[1] if mirrored else None)
                 passes.append((result, scale, mirrored, image.shape[1]))
         if not passes:  # smaller than one patch: the plain pass returns the empty result
             return self._match_once(source_image, target_ids, return_heatmap, jpeg_sigma)
         if len(passes) == 1:
-            return passes[0][0]
+            result, *_ = passes[0]
+            if return_heatmap:
+                result.heatmap = self._heatmap(result.matches, result.coherent_regions, result.best_match)
+            return result
         return self._merge_passes(passes, (h, w), return_heatmap)
 
     def _match_once(self, source_image, target_ids, return_heatmap, jpeg_sigma, mirror_width=None) -> MatchResult:
         """One search pass. ``mirror_width``: the source was mirrored about an image this wide."""
         source_shape = (int(source_image.shape[0]), int(source_image.shape[1]))
         src_patches, src_coords, src_thetas, descriptors = self._extract(source_image)
-        self._mirror_width = mirror_width
 
         if len(src_patches) == 0 or self.index.size == 0:
             return MatchResult(
@@ -545,7 +551,7 @@ class ForensicsEngine:
             )
 
         candidates, verified_per_target = self._verified_candidates(
-            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma
+            src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma, mirror_width
         )
         matches = candidates.matches
 
@@ -563,13 +569,7 @@ class ForensicsEngine:
         elif matches:
             best_match = max(matches, key=lambda m: m.probability)
 
-        heatmap = None
-        if return_heatmap and best_match is not None:
-            if regions:
-                heat_matches = regions[0].matches
-            else:
-                heat_matches = [m for m in matches if m.image_id == best_match.image_id]
-            heatmap = self.aggregator.aggregate(heat_matches, self._targets[best_match.image_id].shape)
+        heatmap = self._heatmap(matches, regions, best_match) if return_heatmap else None
 
         significant = [m for r in regions if r.significant for m in r.matches]
         localization = localize_region(significant, source_shape, largest_component=False)
@@ -582,6 +582,16 @@ class ForensicsEngine:
             stats={**self._stats(len(src_patches), len(matches), regions), "n_tests": n_tests},
             localization=localization,
         )
+
+    def _heatmap(self, matches, regions, best_match) -> Optional[np.ndarray]:
+        """Target heatmap of the best region, or of the best match's image when no region formed."""
+        if best_match is None:
+            return None
+        if regions:
+            heat_matches = regions[0].matches
+        else:
+            heat_matches = [m for m in matches if m.image_id == best_match.image_id]
+        return self.aggregator.aggregate(heat_matches, self._targets[best_match.image_id].shape)
 
     def _merge_passes(self, passes, shape, return_heatmap) -> MatchResult:
         """Bring every query pass (rescaled and/or mirrored) back to original coordinates and combine.
@@ -616,9 +626,7 @@ class ForensicsEngine:
         best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else (
             max(matches, key=lambda m: m.probability) if matches else None
         )
-        heatmap = None
-        if return_heatmap and regions:
-            heatmap = self.aggregator.aggregate(regions[0].matches, self._targets[regions[0].image_id].shape)
+        heatmap = self._heatmap(matches, regions, best_match) if return_heatmap else None
         significant = [m for r in regions if r.significant for m in r.matches]
         plain = passes[0][0]
         stats = self._stats(plain.stats["source_patches"], len(matches), regions)
@@ -678,7 +686,8 @@ class ForensicsEngine:
         sigma = np.sqrt(self.config.noise_sigma ** 2 + source_jpeg_sigma ** 2 + target_sigma ** 2)
         return ProbabilityModel(noise_sigma=float(sigma))
 
-    def _verified_candidates(self, src_patches, src_coords, src_thetas, descriptors, target_ids, jpeg_sigma=0.0):
+    def _verified_candidates(self, src_patches, src_coords, src_thetas, descriptors, target_ids,
+                             jpeg_sigma=0.0, mirror_width=None):
         """k-NN search plus the per-patch chi-square pre-filter, vectorized."""
         k = self.config.k_neighbors
         if self._self_min_offset is not None:
@@ -708,8 +717,8 @@ class ForensicsEngine:
             noise = self._noise_model(image_id, jpeg_sigma)
             if self._self_min_offset is not None:
                 source_xy = src_coords[src_idx].copy()
-                if self._mirror_width is not None:  # judge distance and direction in original coordinates
-                    source_xy[:, 0] = self._mirror_width - self.config.patch_size - source_xy[:, 0]
+                if mirror_width is not None:  # judge distance and direction in original coordinates
+                    source_xy[:, 0] = mirror_width - self.config.patch_size - source_xy[:, 0]
                 offset = target.coords[tgt_idx] - source_xy
                 # Drop trivial self-matches, and keep one direction of each copy
                 # pair (A->B and B->A are the same evidence).
@@ -939,7 +948,13 @@ class ForensicsEngine:
         if index.dim != engine.descriptor.dim:
             raise IndexStoreError(f"index dim {index.dim} doesn't match descriptor dim {engine.descriptor.dim}")
         engine.index = index
-        for image_id, image_path, h, w, jpeg_sigma in state["targets"]:
+        # The index file knows what it is; bundles from before ivfpq existed are flat.
+        engine.config.index_type = index.kind
+        if "ivf_nprobe" in overrides:
+            index.set_nprobe(engine.config.ivf_nprobe)
+        for image_id, image_path, h, w, *rest in state["targets"]:
+            # Bundles written before JPEG-aware noise have no jpeg_sigma column.
+            jpeg_sigma = float(rest[0]) if rest else 0.0
             engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path, jpeg_sigma=jpeg_sigma)
         return engine
 

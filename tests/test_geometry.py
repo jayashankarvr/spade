@@ -84,10 +84,6 @@ class TestRigidClustering:
         assert np.degrees(best.rotation) == pytest.approx(170, abs=1)
         assert best.offset == (100, 50)
 
-    def test_rotation_mode_rejects_pyramid(self):
-        with pytest.raises(ValueError, match="rotation_invariant"):
-            Config(rotation_invariant=True, pyramid_enabled=True)
-
 
 def _mirrored_splice(seed=0):
     from spade.bench.synthetic import _textured_image
@@ -114,6 +110,25 @@ class TestMirroredCopies:
         result = flip.match(tampered)
         assert result.significant_regions and result.significant_regions[0].mirrored
         assert _iou(result.localization.mask, mask) > 0.6
+
+    def test_mirrored_region_reports_no_offset(self):
+        from spade.report import build_report
+
+        donor, tampered, _ = _mirrored_splice()
+        engine = ForensicsEngine()
+        engine.index_target(donor, "d")
+        result = engine.match(tampered)
+        region = build_report(result=result, config=engine.config)["result"]["coherent_regions"][0]
+        assert region["mirrored"] and region["offset"] is None
+
+    def test_heatmap_falls_back_to_matches_without_regions(self):
+        # With mirroring on (two passes) a match that forms no region still gets a heatmap.
+        donor, tampered, _ = _mirrored_splice()
+        engine = ForensicsEngine(Config(coherence_enabled=False))
+        engine.index_target(donor, "d")
+        result = engine.match(tampered)
+        assert result.matches and not result.coherent_regions
+        assert result.heatmap is not None
 
     def test_mirrored_search_counts_its_tests(self):
         donor, tampered, _ = _mirrored_splice()
@@ -159,3 +174,8 @@ class TestQueryScales:
     def test_query_scales_validated(self):
         with pytest.raises(ValueError, match="query_scales"):
             Config(query_scales=[0.5])
+
+
+def test_rotation_alone_turns_the_default_pyramid_off():
+    config = Config(rotation_invariant=True)
+    assert config.rotation_invariant and not config.pyramid_enabled

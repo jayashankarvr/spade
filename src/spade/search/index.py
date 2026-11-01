@@ -2,8 +2,8 @@
 
 Two storage kinds, same interface:
 
-* ``flat``  - exact search, 4 bytes per descriptor value. The default.
-* ``ivfpq`` - product quantization (about one byte per 5 values) plus an
+* ``flat``  - exact search, 4 bytes per descriptor value.
+* ``ivfpq`` - the engine's default. Product quantization (about one byte per 5 values) plus an
   inverted file, so a search only visits ``nprobe`` of the cells. Needs
   training, so vectors sit in an exact buffer until ``train_size`` of them
   have arrived; small collections never leave that exact mode.
@@ -63,6 +63,12 @@ class ANNIndex:
     Ids are never reused, so removing an image is an exact ``remove_ids`` on its
     range and nothing stale is ever returned by a search.
     """
+
+    def set_nprobe(self, nprobe: int) -> None:
+        """Cells an ivfpq search visits (more: slower, fewer missed candidates). No-op for flat."""
+        self.nprobe = int(nprobe)
+        if self.kind == "ivfpq" and self._trained:
+            faiss.extract_index_ivf(self._index).nprobe = self.nprobe
 
     def __init__(self, dim: int, kind: str = "flat", train_size: int = 50_000, nprobe: int = 16):
         if faiss is None:
@@ -215,8 +221,7 @@ class ANNIndex:
                     train_size=int(meta.get("train_size", 50_000)), nprobe=int(meta.get("nprobe", 16)))
         index._index = faiss.read_index(f"{path}.index")
         index._trained = bool(meta.get("trained", True))
-        if index.kind == "ivfpq" and index._trained:
-            faiss.extract_index_ivf(index._index).nprobe = index.nprobe
+        index.set_nprobe(index.nprobe)
         index._next_id = int(meta["next_id"])
         index._ranges = OrderedDict((t[0], (int(t[1]), int(t[2]))) for t in meta["targets"])
         expected = sum(count for _, count in index._ranges.values())

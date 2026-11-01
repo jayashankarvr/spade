@@ -32,7 +32,10 @@ import numpy as np
 # 2.0: match "probability" renamed "fit_p_value"; regions gain "log10_nfa" and
 #      "significant"; result gains "detected"; localization covers significant
 #      regions and its "detection_score" is -log10(NFA) of the best region.
-SCHEMA_VERSION = "2.0"
+# 2.1: regions gain "mirrored", "source_scale" and "rotation_degrees"; "offset" is
+#      null for mirrored or rescaled regions, where no single translation maps
+#      source to target (use the two bboxes). Config records the search settings.
+SCHEMA_VERSION = "2.1"
 
 # Config fields worth recording for reproducibility (kept deliberately small and
 # forensically relevant rather than dumping the whole Config).
@@ -46,8 +49,26 @@ _REPORTED_CONFIG_FIELDS = (
     "noise_sigma",
     "max_nfa",
     "pyramid_enabled",
+    "pyramid_scales",
+    "query_scales",
+    "flip_invariant",
+    "rotation_invariant",
+    "index_type",
+    "ivf_nprobe",
     "coherence_enabled",
 )
+
+
+def region_offset(region) -> Optional[List[int]]:
+    """Source-to-target translation, or None when the region isn't a plain translation.
+
+    Mirrored and rescaled regions are clustered in the coordinates of their
+    search pass, so their stored offset doesn't map original source pixels
+    to the target. Their geometry is in the two bounding boxes instead.
+    """
+    if region.mirrored or region.source_scale != 1.0:
+        return None
+    return [int(region.offset[0]), int(region.offset[1])]
 
 
 def sha256_file(path: str) -> Optional[str]:
@@ -216,7 +237,7 @@ def build_report(
     for region in result.coherent_regions:
         regions.append(
             {
-                "offset": [int(region.offset[0]), int(region.offset[1])],
+                "offset": region_offset(region),
                 "num_matches": len(region.matches),
                 "confidence": float(region.confidence),
                 "source_bbox": _bbox_dict(region.source_bbox),
@@ -224,6 +245,9 @@ def build_report(
                 "color_transform": _region_color_transform(region),
                 "log10_nfa": None if region.log10_nfa is None else round(float(region.log10_nfa), 4),
                 "significant": bool(region.significant),
+                "mirrored": bool(region.mirrored),
+                "source_scale": float(region.source_scale),
+                "rotation_degrees": round(float(np.degrees(region.rotation)), 2),
             }
         )
 

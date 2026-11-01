@@ -223,6 +223,28 @@ class TestIndexLifecycle:
         assert loaded.config.patch_size == 4
         assert loaded.config.min_probability == 0.2
 
+    def test_loads_bundle_without_jpeg_sigma(self, splice, tmp_path):
+        # Bundles written before JPEG-aware noise stored 4 fields per target.
+        import json
+
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        engine.save(str(tmp_path / "bundle"))
+        meta = tmp_path / "bundle.engine.json"
+        state = json.loads(meta.read_text())
+        state["targets"] = [row[:4] for row in state["targets"]]
+        meta.write_text(json.dumps(state))
+        loaded = ForensicsEngine.load(str(tmp_path / "bundle"))
+        assert loaded._targets["donor"].jpeg_sigma == 0.0
+
+    def test_load_applies_nprobe_override(self, splice, tmp_path):
+        engine = ForensicsEngine()
+        engine.index_target(splice.donor, "donor")
+        engine.save(str(tmp_path / "bundle"))
+        loaded = ForensicsEngine.load(str(tmp_path / "bundle"), ivf_nprobe=64)
+        assert loaded.index.nprobe == 64
+        assert loaded.config.index_type == loaded.index.kind
+
     def test_missing_image_file_is_skipped(self, splice, tmp_path):
         engine = ForensicsEngine()
         engine.index_target(splice.donor, "donor", image_path=str(tmp_path / "gone.png"))

@@ -172,6 +172,7 @@ search time; `Config(flip_invariant=False)` turns it off.
 #### Rotated Copies (experimental)
 
 `Config(rotation_invariant=True)` describes every patch in its own orientation
+(and indexes targets at full size only; it doesn't support the pyramid yet)
 and groups matches by rotation + translation. It finds rotated copies and
 recovers the angle, but on our photo benchmark it catches about two thirds of
 copies rotated by arbitrary angles and takes 5-30 s per image, so it's off by

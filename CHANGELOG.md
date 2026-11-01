@@ -65,6 +65,12 @@ This release reworks the matching pipeline. On the synthetic benchmark
 
 ### Added (collections and review)
 - **Mirrored copies, on by default**: the mirrored query is searched too (`Match.mirrored`, `CoherentRegion.mirrored`; `Config(flip_invariant=False)` to disable). Photo splices with half the fragments mirrored: recall 0.45 -> 0.90, AUC 0.80 -> 0.96, false regions unchanged; copy-move on real photos: no extra false alarms. Doubles search time.
+- Bundles saved before JPEG-aware noise (4 fields per target) failed to load; they load again, with no JPEG noise for those targets.
+- `Config(rotation_invariant=True)` raised once the pyramid became the default. Rotation mode now turns the pyramid off with a warning.
+- JSON report schema 2.1: regions carry `mirrored`, `source_scale` and `rotation_degrees`, and `offset` is null for mirrored or rescaled regions (it was in search-pass coordinates, so it didn't map source to target). The recorded config now includes the search settings (`flip_invariant`, `query_scales`, `pyramid_scales`, `rotation_invariant`, `index_type`, `ivf_nprobe`). The API's region info gets the same fields.
+- With mirroring on, a search that formed no region returned no heatmap; it falls back to the best matches again. The per-pass heatmaps that were thrown away aren't computed any more.
+- Target patches are cut from the uint8 pixels and only the selected ones converted, instead of converting a whole pyramid level per lookup.
+- `ForensicsEngine.load(..., ivf_nprobe=N)` now reaches the loaded index, and `config.index_type` reports the index actually loaded.
 - **Donor pyramid on by default**, at scales 1, 0.75 and 0.5 (was off, at 1/0.5/0.25/0.125). CASIA v2, 60 + 60 pairs: IoU 0.27 -> 0.37, recall 0.29 -> 0.39, AUC 0.72 -> 0.77, false regions unchanged, +17% time. `spade serve` no longer forces it off unless `--no-pyramid` is given.
 - `Config.query_scales`: also search the questioned image shrunk, for copies that were enlarged before pasting (`Match.source_scale`). Off by default: on 14 resized CASIA v2 splices it found 5 instead of 4 at 1.7x the time.
 - **Visual HTML report**: `spade.visual.render_html`, `spade match --html report.html` - verdict, both images with matching region outlines, region table with NFA and color transform, heatmap, cues, input hashes; self-contained, light/dark.
