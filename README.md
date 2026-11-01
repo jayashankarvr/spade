@@ -199,6 +199,13 @@ default because it is slower (about 20 s per 192 px pair) and has limits:
 - Within one image, a round object with a radial pattern matches itself
   turned; regions that turn about a point inside both copies are dropped
   for that reason.
+- Rotated copy-moves (a region copied and turned within the same image) are
+  mostly missed. The repeated-texture test copy-move needs compares plain
+  offsets, which a rotation spreads out; without it, edges matching edges at
+  any angle raise alarms on over a third of clean photos, and a version
+  comparing whole rigid transforms didn't separate the two on our test
+  images. Cross-image search (a rotated fragment from another image) is
+  what this mode handles.
 
 #### Large Collections
 
