@@ -4,8 +4,8 @@ Usage:
     python -m spade.bench.download casia2      # or: coverage, comofod
 
 Datasets come from Kaggle and need credentials: an API token in
-KAGGLE_API_TOKEN (or KAGGLE_ACCESS_TOKEN), or KAGGLE_USERNAME and KAGGLE_KEY,
-or ~/.kaggle/kaggle.json
+KAGGLE_API_TOKEN, KAGGLE_ACCESS_TOKEN or ~/.kaggle/access_token, or
+KAGGLE_USERNAME and KAGGLE_KEY, or ~/.kaggle/kaggle.json
 (kaggle.com -> Settings -> API). They're research datasets under their own
 terms; nothing here redistributes them.
 """
@@ -28,8 +28,12 @@ DATASETS = {
 
 
 def _token():
-    """An API token from the environment; both variable names are in use."""
-    return os.environ.get("KAGGLE_API_TOKEN") or os.environ.get("KAGGLE_ACCESS_TOKEN")
+    """An API token: from the environment (both names are in use) or ~/.kaggle/access_token."""
+    token = os.environ.get("KAGGLE_API_TOKEN") or os.environ.get("KAGGLE_ACCESS_TOKEN")
+    if token:
+        return token
+    path = Path.home() / ".kaggle" / "access_token"
+    return path.read_text().strip() or None if path.exists() else None
 
 
 def _kaggle_api():
@@ -37,8 +41,8 @@ def _kaggle_api():
     has_key = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
     if not (has_token or has_key or (Path.home() / ".kaggle" / "kaggle.json").exists()):
         raise SystemExit(
-            "Kaggle credentials missing. Set KAGGLE_API_TOKEN (or KAGGLE_ACCESS_TOKEN), or KAGGLE_USERNAME "
-            "and KAGGLE_KEY "
+            "Kaggle credentials missing. Set KAGGLE_API_TOKEN or KAGGLE_ACCESS_TOKEN (or write the token to "
+            "~/.kaggle/access_token), or KAGGLE_USERNAME and KAGGLE_KEY "
             "(kaggle.com -> Settings -> API)."
         )
     try:
