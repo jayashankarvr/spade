@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage
 
 from spade.aggregation.heatmap import Match, MatchList, SpatialAggregator
 from spade.aggregation.localize import Localization, localize_region, mask_to_bbox
@@ -834,6 +835,17 @@ class ForensicsEngine:
                     cfg.coherence_min_cluster, scores=candidates.prob, limit=_MAX_REGIONS,
                 )
             ]
+        # An offset cluster can hold the copy plus chance matches that happen to
+        # share its offset anywhere in the image. Left together, they stretch
+        # the region's box over half the image and drown the copy. A copy is
+        # one connected piece, so score each spatially connected part alone.
+        src_xy = src_coords[candidates.src_idx]
+        clusters = [
+            (offset, part, image_id, rotation)
+            for offset, rows, image_id, rotation in clusters
+            for part in _connected_parts(rows, src_xy[rows], cfg.patch_size)
+            if len(part) >= cfg.coherence_min_cluster
+        ]
         clusters.sort(key=lambda c: len(c[1]), reverse=True)
 
         n_source = len(src_patches)
@@ -1077,6 +1089,26 @@ def _resize(image: np.ndarray, scale: float) -> np.ndarray:
 
 def _to_uint8(image: np.ndarray) -> np.ndarray:
     return np.clip(np.round(image * 255.0), 0, 255).astype(np.uint8)
+
+
+def _connected_parts(rows: np.ndarray, xy: np.ndarray, gap: int) -> List[np.ndarray]:
+    """Split ``rows`` into groups whose positions ``xy`` link up within about ``gap`` pixels.
+
+    Positions are binned into gap-sized cells and cells touching (8-neighbours)
+    are joined, so two patches link when their cells are adjacent: closer than
+    one gap always, up to two gaps apart at most.
+    """
+    cells = xy // gap
+    lo = cells.min(axis=0)
+    grid = np.zeros(tuple((cells.max(axis=0) - lo + 1)[::-1]), dtype=bool)
+    grid[cells[:, 1] - lo[1], cells[:, 0] - lo[0]] = True
+    labels, n = ndimage.label(grid, np.ones((3, 3), int))
+    if n == 1:
+        return [rows]
+    which = labels[cells[:, 1] - lo[1], cells[:, 0] - lo[0]]
+    order = np.argsort(which, kind="stable")
+    bounds = np.cumsum(np.bincount(which)[1:])[:-1]
+    return np.split(rows[order], bounds)
 
 
 def _halves_touch(region, max_gap: int, max_shift: int = 2) -> bool:

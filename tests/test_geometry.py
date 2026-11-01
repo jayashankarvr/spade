@@ -208,3 +208,21 @@ class TestSymmetricObjects:
         half = gaussian_filter(half.astype(float), (1, 1, 0)).astype(np.uint8)
         symmetric = np.concatenate([half, half[:, ::-1]], axis=1)
         assert not ForensicsEngine().match_self(symmetric).significant_regions
+
+
+class TestConnectedParts:
+    def test_copy_and_far_strays_are_split(self):
+        from spade.engine import _connected_parts
+
+        block = np.array([(x, y) for x in range(100, 140) for y in range(50, 90)])
+        strays = np.array([(5, 5), (400, 300), (250, 10)])
+        xy = np.concatenate([block, strays])
+        parts = _connected_parts(np.arange(len(xy)), xy, gap=5)
+        sizes = sorted(len(p) for p in parts)
+        assert sizes == [1, 1, 1, len(block)]
+
+    def test_one_piece_stays_whole(self):
+        from spade.engine import _connected_parts
+
+        xy = np.array([(x, 20) for x in range(0, 60, 4)])   # a line with 4 px steps
+        assert len(_connected_parts(np.arange(len(xy)), xy, gap=5)) == 1
