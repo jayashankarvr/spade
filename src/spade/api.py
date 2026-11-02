@@ -271,6 +271,10 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
             "max_nfa": engine.config.max_nfa,
             "pyramid_enabled": engine.config.pyramid_enabled,
             "coherence_enabled": engine.config.coherence_enabled,
+            "flip_invariant": engine.config.flip_invariant,
+            "query_scales": engine.config.query_scales,
+            "rotation_invariant": engine.config.rotation_invariant,
+            "thorough": engine.config.thorough,
         }
 
     @app.post("/index", response_model=IndexResponse)

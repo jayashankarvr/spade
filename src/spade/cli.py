@@ -45,7 +45,7 @@ def validate_params(threshold: Optional[float], patch_size: Optional[int], entro
 
 
 THOROUGH_HELP = ("Also check mirrored, enlarged and rotated copies, not just copied, recolored and "
-                 "shrunk ones; several times slower")
+                 "shrunk ones (rotation across images only, not within one image); about 13x slower")
 
 
 def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: Optional[float],

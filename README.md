@@ -67,7 +67,8 @@ spade match source.jpg target.jpg
 # With options: patch size, heatmap, JSON forensic report
 spade match source.jpg target.jpg -p 6 -o heatmap.png -j report.json -v
 
-# Index a directory (writes myindex.index, myindex.meta.json, myindex.engine.json)
+# Index a directory (writes myindex.index, myindex.meta.json, myindex.engine.json;
+# with --thorough also myindex.rotated.*)
 spade index images/ -o myindex
 
 # Search against the saved index; patches are reloaded from the indexed files
@@ -151,7 +152,8 @@ is duplicated is still reported: scikit-image's `grass` and `gravel` photos
 each contain a cloned strip, and SPADE finds them, so the benchmark leaves
 those photos out.
 
-Mirrored copies are searched too, which raises a trap: a left-right symmetric
+With mirroring on (`flip_invariant`, part of `thorough`), mirrored copies are
+searched too, which raises a trap: a left-right symmetric
 object (a face, a facade, the round edge of a microscope or fundus photo)
 matches its own mirror image. Its two halves sit side by side on the same
 rows, so mirrored regions shaped like that are dropped. The price is a
@@ -187,10 +189,17 @@ engine = ForensicsEngine(Config(thorough=True))   # CLI: spade match --thorough 
 | cut out / cropped, moved | yes | yes |
 | recolored (brightness, contrast, colour grade, tone curve) | yes | yes |
 | JPEG recompression | yes | yes |
-| shrunk | yes (target pyramid) | yes |
-| mirrored | - | yes |
-| enlarged | - | yes (`query_scales`) |
-| rotated | - | yes, cross-image search only (a second, ring-based search) |
+| shrunk | yes, cross-image (target pyramid) | yes, cross-image |
+| mirrored (left-right; up-down too, as mirror plus 180 degrees) | - | yes |
+| enlarged | - | yes, cross-image (`query_scales`) |
+| rotated | - | yes, cross-image (a second, ring-based search) |
+
+Not checked even with `thorough`: a copy that is both rotated and rescaled;
+rotated or rescaled copies within one image (copy-move gets mirroring only);
+non-uniform scaling, shear or perspective. `thorough` takes about 13x as long
+as the default and holds a second index (about twice the memory); a thorough
+`spade index` writes `.rotated.*` files next to the usual three, which belong
+with it.
 
 `thorough` combines its searches into one result and multiplies every region's
 NFA by the number of searches combined, so the NFA keeps its meaning. With
@@ -449,8 +458,9 @@ spec:
    patches matched at all.
 
 Handles brightness, contrast, color grading (any affine color transform),
-JPEG recompression and, with the pyramid, downscaled copies. It does not handle
-rotation or non-uniform geometric distortion.
+JPEG recompression and, with the pyramid, downscaled copies; mirrored, enlarged
+and rotated copies with the options above. It does not handle non-uniform
+geometric distortion.
 
 A significant NFA means "not chance", which isn't the same as "copied":
 content that is genuinely identical by design (the same logo, text glyphs,

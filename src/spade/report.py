@@ -53,6 +53,7 @@ _REPORTED_CONFIG_FIELDS = (
     "query_scales",
     "flip_invariant",
     "rotation_invariant",
+    "thorough",
     "index_type",
     "ivf_nprobe",
     "coherence_enabled",

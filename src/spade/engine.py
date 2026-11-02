@@ -241,9 +241,10 @@ class Config:
     flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", False))
     # Check every kind of copy SPADE knows, not just the common ones (copied or
     # cropped, recolored, recompressed, shrunk): also mirrored and enlarged
-    # copies, and a second, rotation-invariant search for rotated ones.
-    # Several times slower; region NFAs are multiplied by the number of
-    # searches combined, so they stay comparable.
+    # copies, and a second, rotation-invariant search for rotated ones (in
+    # cross-image search; not rotation combined with a scale change). Turns
+    # flip_invariant on and widens query_scales. About 13x slower and twice the
+    # memory; region NFAs are multiplied by the number of searches combined.
     thorough: bool = field(default_factory=lambda: _env_bool("SPADE_THOROUGH", False))
     # Also search the questioned image shrunk to these scales, for copies that
     # were enlarged before pasting (the pyramid covers shrunk ones).
@@ -445,7 +446,11 @@ class ForensicsEngine:
         target.path, target.jpeg_sigma = image_path, float(jpeg_sigma)
         self._targets[image_id] = target
         if self._rotated is not None:
-            self._rotated.index_target(image, image_id, image_path=image_path, jpeg_sigma=jpeg_sigma)
+            try:
+                self._rotated.index_target(image, image_id, image_path=image_path, jpeg_sigma=jpeg_sigma)
+            except Exception:
+                self.remove_target(image_id)   # keep the two indexes in step
+                raise
         return len(descriptors)
 
     def _describe_target(self, image: np.ndarray) -> Tuple[_Target, np.ndarray]:
@@ -569,12 +574,14 @@ class ForensicsEngine:
                 region.log10_nfa += float(np.log10(factor))
                 region.n_tests = (region.n_tests or 0.0) * factor
             regions.extend(result.coherent_regions)
-        regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
+        regions = _drop_duplicate_regions(regions)
         matches = MatchList.concat([r.matches for r in results])
         best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else matches.best()
         significant = [m for r in regions if r.significant for m in r.matches]
         stats = self._stats(results[0].stats["source_patches"], len(matches), regions)
-        stats["n_tests"] = sum(r.stats.get("n_tests", 0.0) for r in results) * factor
+        # The union of the searches' hypotheses (each region NFA carries the factor).
+        stats["n_tests"] = sum(r.stats.get("n_tests", 0.0) for r in results)
+        stats["searches"] = ["translation", "rotation"]
         return MatchResult(
             matches=matches,
             best_match=best_match,
@@ -695,7 +702,7 @@ class ForensicsEngine:
                 region.n_tests *= n_passes
             regions.extend(result.coherent_regions)
         matches = MatchList.concat([result.matches for result, *_ in passes])
-        regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
+        regions = _drop_duplicate_regions(regions)
 
         best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else matches.best()
         heatmap = self._heatmap(matches, regions, best_match) if return_heatmap else None
@@ -1103,6 +1110,8 @@ class ForensicsEngine:
             "rotation_invariant", "index_type", "thorough",
         }
         overrides = {k: v for k, v in config_overrides.items() if k not in frozen}
+        # Bundles from before thorough existed aren't thorough, whatever SPADE_THOROUGH says.
+        state["config"].setdefault("thorough", False)
         engine = cls(Config.from_dict(state["config"], **overrides))
         # Bundles from before the descriptor was recorded used the luminance one.
         saved = state.get("descriptor", "LuminanceDescriptor")
@@ -1122,7 +1131,12 @@ class ForensicsEngine:
             jpeg_sigma = float(rest[0]) if rest else 0.0
             engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path, jpeg_sigma=jpeg_sigma)
         if engine._rotated is not None:
-            engine._rotated = cls.load(f"{path}.rotated", **overrides)
+            if not os.path.exists(f"{path}.rotated.engine.json"):
+                raise IndexStoreError(f"{path} is a thorough index but its rotation index ({path}.rotated.*) "
+                                      f"is missing; copy it along or re-index with --thorough")
+            # The rotation search keeps its own geometry; only thresholds carry over.
+            geometry = {"flip_invariant", "query_scales"}
+            engine._rotated = cls.load(f"{path}.rotated", **{k: v for k, v in overrides.items() if k not in geometry})
         return engine
 
     def _load_target(self, image_id: str) -> Optional[_Target]:
@@ -1209,6 +1223,34 @@ def _resize(image: np.ndarray, scale: float) -> np.ndarray:
 
 def _to_uint8(image: np.ndarray) -> np.ndarray:
     return np.clip(np.round(image * 255.0), 0, 255).astype(np.uint8)
+
+
+def _drop_duplicate_regions(regions: List[CoherentRegion], overlap: float = 0.5) -> List[CoherentRegion]:
+    """Most significant first, keeping one region per copy.
+
+    Several search passes (scales, the rotation search) can each find the same
+    copy. Counting it once matters for anything that counts regions: the
+    report, provenance links, FDR across searches. A region is a duplicate
+    when its source box overlaps a stronger region's on the same target by
+    more than ``overlap`` (intersection over union).
+    """
+    kept: List[CoherentRegion] = []
+    for region in sorted(regions, key=lambda r: (r.log10_nfa, -len(r.matches))):
+        x, y, w, h = region.source_bbox
+        duplicate = False
+        for other in kept:
+            if other.image_id != region.image_id:
+                continue
+            ox, oy, ow, oh = other.source_bbox
+            ix = max(0, min(x + w, ox + ow) - max(x, ox))
+            iy = max(0, min(y + h, oy + oh) - max(y, oy))
+            inter = ix * iy
+            if inter and inter / float(w * h + ow * oh - inter) > overlap:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(region)
+    return kept
 
 
 def _connected_parts(rows: np.ndarray, xy: np.ndarray, gap: int) -> List[np.ndarray]:

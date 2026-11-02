@@ -341,6 +341,7 @@ class TestRotationMode:
         with pytest.raises(IndexStoreError):
             ForensicsEngine.load(str(tmp_path / "rot"))
 
+
 class TestThorough:
     """Config(thorough=True): the common checks plus mirrored, enlarged and rotated copies."""
 
@@ -375,8 +376,56 @@ class TestThorough:
         engine = ForensicsEngine(Config(thorough=True))
         engine.index_target(donor, "d")
         plain = engine._search(tampered["mirrored"], None, False, 0.0)
+        rotated = engine._rotated.match(tampered["mirrored"], None, False, 0.0)
         combined = engine.match(tampered["mirrored"], return_heatmap=False)
-        assert combined.stats["n_tests"] >= 2 * plain.stats["n_tests"]
+        assert combined.stats["n_tests"] == pytest.approx(plain.stats["n_tests"] + rotated.stats["n_tests"])
+        best = min(r.log10_nfa for r in plain.coherent_regions + rotated.coherent_regions)
+        # Each region pays for the second search: its NFA doubles.
+        assert combined.coherent_regions[0].log10_nfa == pytest.approx(best + np.log10(2))
+
+    def test_one_splice_is_one_region(self):
+        # The scale passes and the rotation search all find a plain splice; it's reported once.
+        from spade.bench.synthetic import make_recolored_splice
+
+        sample = make_recolored_splice(seed=3)
+        engine = ForensicsEngine(Config(thorough=True))
+        engine.index_target(sample.donor, "d")
+        assert len(engine.match(sample.tampered, return_heatmap=False).significant_regions) == 1
+
+    def test_unrelated_pair_stays_quiet(self):
+        negative = make_negative_pair(seed=205)
+        engine = ForensicsEngine(Config(thorough=True))
+        engine.index_target(negative.donor, "d")
+        assert not engine.match(negative.tampered, return_heatmap=False).significant_regions
+
+    def test_eviction_keeps_both_indexes_in_step(self):
+        engine = ForensicsEngine(Config(thorough=True, max_targets=2))
+        for i in range(4):
+            engine.index_target(make_negative_pair(seed=210 + i).donor, f"t{i}")
+        assert engine.target_ids == engine._rotated.target_ids == ["t2", "t3"]
+
+    def test_older_bundle_loads_with_thorough_in_the_environment(self, tmp_path, monkeypatch):
+        import json
+
+        engine = ForensicsEngine()
+        engine.index_target(make_negative_pair(seed=206).donor, "d")
+        engine.save(str(tmp_path / "old"))
+        meta = tmp_path / "old.engine.json"
+        state = json.loads(meta.read_text())
+        del state["config"]["thorough"]          # written before thorough existed
+        meta.write_text(json.dumps(state))
+        monkeypatch.setenv("SPADE_THOROUGH", "true")
+        assert not ForensicsEngine.load(str(tmp_path / "old")).config.thorough
+
+    def test_missing_rotation_index_is_a_clear_error(self, tmp_path):
+        from spade.exceptions import IndexStoreError
+
+        engine = ForensicsEngine(Config(thorough=True))
+        engine.index_target(make_negative_pair(seed=207).donor, "d")
+        engine.save(str(tmp_path / "b"))
+        (tmp_path / "b.rotated.engine.json").unlink()
+        with pytest.raises(IndexStoreError, match="re-index"):
+            ForensicsEngine.load(str(tmp_path / "b"))
 
     def test_save_load_and_remove(self, tmp_path):
         donor, tampered = self._splices()
