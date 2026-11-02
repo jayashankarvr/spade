@@ -171,13 +171,40 @@ engine.index_target(load_image(path), path, image_path=path)   # read from the f
 result = engine.match(image, jpeg_sigma=quantization_sigma("questioned.jpg") or 0.0)
 ```
 
+#### Quick or Thorough
+
+Most copied fragments are cut out (cropped), recolored, recompressed or
+shrunk, and the default search covers exactly those. Mirrored, enlarged and
+rotated copies are rarer and cost several extra searches each, so they are
+checked only when asked for:
+
+```python
+engine = ForensicsEngine(Config(thorough=True))   # CLI: spade match --thorough ...
+```
+
+| Edit to the copied fragment | default | `thorough` |
+|---|---|---|
+| cut out / cropped, moved | yes | yes |
+| recolored (brightness, contrast, colour grade, tone curve) | yes | yes |
+| JPEG recompression | yes | yes |
+| shrunk | yes (target pyramid) | yes |
+| mirrored | - | yes |
+| enlarged | - | yes (`query_scales`) |
+| rotated | - | yes, cross-image search only (a second, ring-based search) |
+
+`thorough` combines its searches into one result and multiplies every region's
+NFA by the number of searches combined, so the NFA keeps its meaning. With
+`spade index`, decide when indexing: `spade search` and `spade scan` follow
+the index. The pieces can also be switched on one by one
+(`flip_invariant`, `query_scales`, `rotation_invariant`).
+
 #### Mirrored Copies
 
-On by default: the mirrored query is searched too, so a fragment that was
-flipped before pasting is found (`Match.mirrored`, `CoherentRegion.mirrored`).
-On photo splices where half the fragments are mirrored it doubles recall
-(0.45 -> 0.90); on copy-move in real photos it adds no false alarms. It doubles
-search time; `Config(flip_invariant=False)` turns it off.
+`Config(flip_invariant=True)` (part of `thorough`) also searches the mirrored
+query, so a fragment that was flipped before pasting is found
+(`Match.mirrored`, `CoherentRegion.mirrored`). On photo splices where half the
+fragments are mirrored it doubles recall (0.45 -> 0.90); on copy-move in real
+photos it adds no false alarms. It doubles search time.
 
 #### Rotated Copies (experimental)
 
@@ -336,6 +363,7 @@ export SPADE_NOISE_SIGMA=0.02         # Expected noise (0-1 scale)
 export SPADE_MAX_NFA=1.0              # Significance threshold for regions
 export SPADE_ENTROPY_THRESHOLD=       # Optional texture floor in bits (unset = off)
 export SPADE_PYRAMID_ENABLED=false    # Index targets at full size only
+export SPADE_THOROUGH=true            # Also check mirrored, enlarged and rotated copies
 export SPADE_MAX_TARGETS=1000         # Evict least recently indexed targets
 ```
 

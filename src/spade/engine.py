@@ -236,8 +236,15 @@ class Config:
     # instead of translations.
     rotation_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_ROTATION_INVARIANT", False))
     # Also search the mirrored source, so horizontally flipped copies are found
-    # (vertical flips too, together with rotation_invariant).
-    flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", True))
+    # (vertical flips too, together with rotation_invariant). Doubles the time;
+    # on with thorough.
+    flip_invariant: bool = field(default_factory=lambda: _env_bool("SPADE_FLIP_INVARIANT", False))
+    # Check every kind of copy SPADE knows, not just the common ones (copied or
+    # cropped, recolored, recompressed, shrunk): also mirrored and enlarged
+    # copies, and a second, rotation-invariant search for rotated ones.
+    # Several times slower; region NFAs are multiplied by the number of
+    # searches combined, so they stay comparable.
+    thorough: bool = field(default_factory=lambda: _env_bool("SPADE_THOROUGH", False))
     # Also search the questioned image shrunk to these scales, for copies that
     # were enlarged before pasting (the pyramid covers shrunk ones).
     query_scales: List[float] = field(default_factory=lambda: [1.0])
@@ -289,6 +296,10 @@ class Config:
             self.pyramid_enabled = False
         if self.max_targets is not None and self.max_targets < 1:
             raise ConfigurationError(f"max_targets must be >= 1 or None, got {self.max_targets}")
+        if self.thorough:
+            self.flip_invariant = True
+            if self.query_scales == [1.0]:
+                self.query_scales = [1.0, 0.75, 0.5]
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -382,6 +393,14 @@ class ForensicsEngine:
             )
         self._targets: "OrderedDict[str, _Target]" = OrderedDict()
         self._load_lock = threading.Lock()
+        # thorough: rotated copies need their own index (ring descriptors), so a
+        # second engine in rotation mode searches alongside this one.
+        self._rotated: Optional["ForensicsEngine"] = None
+        if self.config.thorough and not self.config.rotation_invariant:
+            self._rotated = ForensicsEngine(dataclasses.replace(
+                self.config, thorough=False, rotation_invariant=True, pyramid_enabled=False,
+                flip_invariant=True, query_scales=[1.0],
+            ))
         # Set only on the private engine match_self builds: search the image
         # against itself, ignoring offsets shorter than this.
         self._self_min_offset: Optional[int] = None
@@ -425,6 +444,8 @@ class ForensicsEngine:
             jpeg_sigma = (quantization_sigma(image_path) if image_path else None) or 0.0
         target.path, target.jpeg_sigma = image_path, float(jpeg_sigma)
         self._targets[image_id] = target
+        if self._rotated is not None:
+            self._rotated.index_target(image, image_id, image_path=image_path, jpeg_sigma=jpeg_sigma)
         return len(descriptors)
 
     def _describe_target(self, image: np.ndarray) -> Tuple[_Target, np.ndarray]:
@@ -500,6 +521,8 @@ class ForensicsEngine:
             return False
         del self._targets[image_id]
         self.index.remove(image_id)
+        if self._rotated is not None:
+            self._rotated.remove_target(image_id)
         return True
 
     # ------------------------------------------------------------------
@@ -527,6 +550,42 @@ class ForensicsEngine:
             MatchResult. ``coherent_regions`` are sorted most significant first;
             use ``significant_regions`` for the ones with NFA < max_nfa.
         """
+        if self._rotated is None:
+            return self._search(source_image, target_ids, return_heatmap, jpeg_sigma)
+        plain = self._search(source_image, target_ids, False, jpeg_sigma)
+        rotated = self._rotated.match(source_image, target_ids, False, jpeg_sigma)
+        return self._combine_searches([plain, rotated], self._normalize_image(source_image).shape[:2], return_heatmap)
+
+    def _combine_searches(self, results: List[MatchResult], shape, return_heatmap: bool) -> MatchResult:
+        """Merge independent searches of one source (thorough mode) into one result.
+
+        Each search tried its own family of hypotheses, so every region's NFA
+        and test count are multiplied by the number of searches.
+        """
+        factor = float(len(results))
+        regions = []
+        for result in results:
+            for region in result.coherent_regions:
+                region.log10_nfa += float(np.log10(factor))
+                region.n_tests = (region.n_tests or 0.0) * factor
+            regions.extend(result.coherent_regions)
+        regions.sort(key=lambda r: (r.log10_nfa, -len(r.matches)))
+        matches = MatchList.concat([r.matches for r in results])
+        best_match = max(regions[0].matches, key=lambda m: m.probability) if regions else matches.best()
+        significant = [m for r in regions if r.significant for m in r.matches]
+        stats = self._stats(results[0].stats["source_patches"], len(matches), regions)
+        stats["n_tests"] = sum(r.stats.get("n_tests", 0.0) for r in results) * factor
+        return MatchResult(
+            matches=matches,
+            best_match=best_match,
+            heatmap=self._heatmap(matches, regions, best_match) if return_heatmap else None,
+            coherent_regions=regions,
+            stats=stats,
+            localization=localize_region(significant, tuple(shape), largest_component=False),
+        )
+
+    def _search(self, source_image, target_ids, return_heatmap, jpeg_sigma) -> MatchResult:
+        """One search family: the plain (and mirrored / rescaled) passes of this engine's mode."""
         source_image = self._normalize_image(source_image)
         h, w = source_image.shape[:2]
         scales = [1.0] if self._self_min_offset is not None else sorted(set(self.config.query_scales), reverse=True)
@@ -672,7 +731,9 @@ class ForensicsEngine:
         regions that turn about a point inside both copies are dropped too: a
         round object with a radial pattern matching itself turned.
         """
-        engine = ForensicsEngine(dataclasses.replace(self.config, pyramid_enabled=False, max_targets=None))
+        # Rotated copy-moves aren't handled yet, so thorough adds no rotation search here.
+        engine = ForensicsEngine(dataclasses.replace(self.config, pyramid_enabled=False, max_targets=None,
+                                                     thorough=False))
         engine._self_min_offset = min_offset if min_offset is not None else 2 * self.config.patch_size
         image = self._normalize_image(image)
         engine.index_target(image, "self", jpeg_sigma=jpeg_sigma)
@@ -1017,6 +1078,8 @@ class ForensicsEngine:
             ],
         }
         _atomic_write(f"{path}.engine.json", lambda tmp: _write_json(tmp, state))
+        if self._rotated is not None:
+            self._rotated.save(f"{path}.rotated")
 
     @classmethod
     def load(cls, path: str, **config_overrides) -> "ForensicsEngine":
@@ -1037,7 +1100,7 @@ class ForensicsEngine:
 
         frozen = {
             "patch_size", "stride", "entropy_threshold", "pyramid_enabled", "pyramid_scales", "pyramid_min_size",
-            "rotation_invariant", "index_type",
+            "rotation_invariant", "index_type", "thorough",
         }
         overrides = {k: v for k, v in config_overrides.items() if k not in frozen}
         engine = cls(Config.from_dict(state["config"], **overrides))
@@ -1058,6 +1121,8 @@ class ForensicsEngine:
             # Bundles written before JPEG-aware noise have no jpeg_sigma column.
             jpeg_sigma = float(rest[0]) if rest else 0.0
             engine._targets[image_id] = _Target(shape=(int(h), int(w)), path=image_path, jpeg_sigma=jpeg_sigma)
+        if engine._rotated is not None:
+            engine._rotated = cls.load(f"{path}.rotated", **overrides)
         return engine
 
     def _load_target(self, image_id: str) -> Optional[_Target]:

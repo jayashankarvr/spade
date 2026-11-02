@@ -44,9 +44,14 @@ def validate_params(threshold: Optional[float], patch_size: Optional[int], entro
         raise click.BadParameter(f"entropy must be >= 0, got {entropy}")
 
 
-def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: Optional[float]) -> Config:
+THOROUGH_HELP = ("Also check mirrored, enlarged and rotated copies, not just copied, recolored and "
+                 "shrunk ones; several times slower")
+
+
+def build_config(threshold: Optional[float], patch_size: Optional[int], entropy: Optional[float],
+                 thorough: bool = False) -> Config:
     """Config from CLI flags; anything left as None keeps its Config/SPADE_* default."""
-    overrides = {}
+    overrides = {"thorough": True} if thorough else {}
     if entropy is not None:
         overrides["entropy_threshold"] = entropy if entropy > 0 else None
     if threshold is not None:
@@ -109,6 +114,7 @@ THRESHOLD_HELP = "Per-patch fit p-value floor (0-1); default from config"
 @click.option("-o", "--output", type=click.Path(), help="Output heatmap image path")
 @click.option("-j", "--json", "json_output", type=click.Path(), help="Write JSON forensic report to this path")
 @click.option("--html", "html_output", type=click.Path(), help="Write a visual HTML report to this path")
+@click.option("--thorough", is_flag=True, help=THOROUGH_HELP)
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 def match(
     source: str,
@@ -119,11 +125,12 @@ def match(
     output: Optional[str],
     json_output: Optional[str],
     html_output: Optional[str],
+    thorough: bool,
     verbose: bool,
 ):
     """Match SOURCE image against TARGET image."""
     validate_params(threshold, patch_size, entropy)
-    config = build_config(threshold, patch_size, entropy)
+    config = build_config(threshold, patch_size, entropy, thorough)
 
     if verbose:
         click.echo(f"Loading source: {source}")
@@ -185,7 +192,8 @@ def match(
 @click.option("-o", "--output", default="index.spade", help="Output index path prefix")
 @click.option("-p", "--pattern", default="*.jpg,*.png", help="File patterns to index")
 @click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
-def index(directory: str, output: str, pattern: str, patch_size: Optional[int]):
+@click.option("--thorough", is_flag=True, help=THOROUGH_HELP + " (decided when indexing; search and scan follow the index)")
+def index(directory: str, output: str, pattern: str, patch_size: Optional[int], thorough: bool):
     """Index all images in DIRECTORY for later searching."""
     dir_path = Path(directory)
     patterns = [p.strip() for p in pattern.split(",")]
@@ -205,7 +213,7 @@ def index(directory: str, output: str, pattern: str, patch_size: Optional[int]):
 
     click.echo(f"Found {len(image_files)} images")
 
-    engine = ForensicsEngine(build_config(None, patch_size, None))
+    engine = ForensicsEngine(build_config(None, patch_size, None, thorough))
     total_patches = 0
 
     with click.progressbar(image_files, label="Indexing") as progress:
@@ -306,7 +314,8 @@ def scan(index_file: str, sources, fdr: float):
 @click.option("--copy-moves", is_flag=True, help="Also look for regions duplicated within each image")
 @click.option("--json", "json_output", type=click.Path(), help="Write the links as JSON")
 @click.option("--dot", "dot_output", type=click.Path(), help="Write a Graphviz graph of the links")
-def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_output, dot_output):
+@click.option("--thorough", is_flag=True, help=THOROUGH_HELP)
+def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_output, dot_output, thorough: bool):
     """Find which images in DIRECTORY share copied regions with which.
 
     Links are undirected: the pixels don't say which image was the original.
@@ -318,7 +327,7 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
     paths = sorted({p for pat in pattern.split(",") for p in Path(directory).glob(pat.strip())})
     if len(paths) < 2 and not copy_moves:
         raise click.ClickException("Need at least two images (or --copy-moves).")
-    engine = ForensicsEngine(build_config(None, None, None))
+    engine = ForensicsEngine(build_config(None, None, None, thorough))
     images = {}
     with click.progressbar(paths, label="Indexing") as progress:
         for path in progress:
@@ -347,11 +356,13 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
 @click.option("--port", "-p", default=8000, help="Port to listen on")
 @click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
 @click.option("--pyramid/--no-pyramid", default=None, help="Index targets at several scales (default: on)")
+@click.option("--thorough", is_flag=True, help=THOROUGH_HELP)
 def serve(
     host: str,
     port: int,
     patch_size: Optional[int],
     pyramid: Optional[bool],
+    thorough: bool,
 ):
     """Start the REST API server."""
     try:
@@ -361,7 +372,7 @@ def serve(
             "FastAPI required for API server: pip install spade-forensics[api]"
         )
 
-    overrides = {}
+    overrides = {"thorough": True} if thorough else {}
     if pyramid is not None:
         overrides["pyramid_enabled"] = pyramid
     if patch_size is not None:

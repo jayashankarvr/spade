@@ -119,7 +119,7 @@ class TestMirroredCopies:
         from spade.report import build_report
 
         donor, tampered, _ = _mirrored_splice()
-        engine = ForensicsEngine()
+        engine = ForensicsEngine(Config(flip_invariant=True))
         engine.index_target(donor, "d")
         result = engine.match(tampered)
         region = build_report(result=result, config=engine.config)["result"]["coherent_regions"][0]
@@ -128,7 +128,7 @@ class TestMirroredCopies:
     def test_heatmap_falls_back_to_matches_without_regions(self):
         # With mirroring on (two passes) a match that forms no region still gets a heatmap.
         donor, tampered, _ = _mirrored_splice()
-        engine = ForensicsEngine(Config(coherence_enabled=False))
+        engine = ForensicsEngine(Config(coherence_enabled=False, flip_invariant=True))
         engine.index_target(donor, "d")
         result = engine.match(tampered)
         assert result.matches and not result.coherent_regions
@@ -340,3 +340,63 @@ class TestRotationMode:
         meta.write_text(json.dumps(state))
         with pytest.raises(IndexStoreError):
             ForensicsEngine.load(str(tmp_path / "rot"))
+
+class TestThorough:
+    """Config(thorough=True): the common checks plus mirrored, enlarged and rotated copies."""
+
+    @staticmethod
+    def _splices():
+        from PIL import Image
+
+        skimage = pytest.importorskip("skimage.data")
+        donor_full, host = skimage.astronaut(), skimage.coffee()
+        donor = donor_full[100:260, 100:260]
+        out = {}
+        for kind in ("mirrored", "rotated"):
+            window = donor_full[130:210, 130:210]
+            piece = window[16:64, 16:64][:, ::-1] if kind == "mirrored" else \
+                np.asarray(Image.fromarray(window).rotate(50, resample=Image.BICUBIC))[16:64, 16:64]
+            tampered = host[100:260, 100:260].copy()
+            tampered[60:108, 50:98] = piece
+            out[kind] = tampered
+        return donor, out
+
+    def test_finds_what_the_default_skips(self):
+        donor, tampered = self._splices()
+        fast, thorough = ForensicsEngine(), ForensicsEngine(Config(thorough=True))
+        for engine in (fast, thorough):
+            engine.index_target(donor, "d")
+        for kind, image in tampered.items():
+            assert not fast.match(image, return_heatmap=False).significant_regions, kind
+            assert thorough.match(image, return_heatmap=False).significant_regions, kind
+
+    def test_counts_both_searches(self):
+        donor, tampered = self._splices()
+        engine = ForensicsEngine(Config(thorough=True))
+        engine.index_target(donor, "d")
+        plain = engine._search(tampered["mirrored"], None, False, 0.0)
+        combined = engine.match(tampered["mirrored"], return_heatmap=False)
+        assert combined.stats["n_tests"] >= 2 * plain.stats["n_tests"]
+
+    def test_save_load_and_remove(self, tmp_path):
+        donor, tampered = self._splices()
+        engine = ForensicsEngine(Config(thorough=True))
+        engine.index_target(donor, "d")
+        engine.save(str(tmp_path / "b"))
+        loaded = ForensicsEngine.load(str(tmp_path / "b"))
+        assert loaded._rotated is not None and loaded._rotated.target_ids == ["d"]
+        loaded.remove_target("d")
+        assert loaded._rotated.target_ids == []
+
+    def test_copy_move_has_no_rotation_search(self, monkeypatch):
+        calls = []
+        real = ForensicsEngine.__init__
+
+        def spy(self, config=None):
+            calls.append(bool(config and config.rotation_invariant))
+            real(self, config)
+
+        monkeypatch.setattr(ForensicsEngine, "__init__", spy)
+        ForensicsEngine(Config(thorough=True)).match_self(make_copy_move(seed=1).tampered)
+        # The thorough engine, its rotation helper, then copy-move's engine without one.
+        assert calls == [False, True, False]

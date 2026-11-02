@@ -41,12 +41,15 @@ class MatchList(Sequence):
     (a region setting its colour transform) stick.
     """
 
-    _FIELDS = ("src_xy", "tgt_xy", "prob", "image_ids", "scale", "rotation", "mirrored", "source_scale")
+    _FIELDS = ("src_xy", "tgt_xy", "prob", "image_ids", "scale", "rotation", "mirrored", "source_scale", "patch_sizes")
 
     def __init__(self, patch_size: int, src_xy, tgt_xy, prob, image_ids, scale, rotation=None,
-                 mirrored=None, source_scale=None):
+                 mirrored=None, source_scale=None, patch_sizes=None):
         n = len(prob)
         self.patch_size = patch_size
+        # Per match, since a thorough search combines footprints of different sizes.
+        self.patch_sizes = (np.full(n, patch_size, dtype=np.int64) if patch_sizes is None
+                            else np.asarray(patch_sizes, dtype=np.int64))
         self.src_xy = np.asarray(src_xy, dtype=np.int64).reshape(n, 2)
         self.tgt_xy = np.asarray(tgt_xy, dtype=np.int64).reshape(n, 2)
         self.prob = np.asarray(prob, dtype=np.float64)
@@ -87,7 +90,7 @@ class MatchList(Sequence):
             match = Match(
                 source_coord=(int(self.src_xy[i, 0]), int(self.src_xy[i, 1])),
                 target_coord=(int(self.tgt_xy[i, 0]), int(self.tgt_xy[i, 1])),
-                patch_size=self.patch_size,
+                patch_size=int(self.patch_sizes[i]),
                 probability=float(self.prob[i]),
                 image_id=self.image_ids[i],
                 target_scale=float(self.scale[i]),
@@ -119,7 +122,7 @@ class MatchList(Sequence):
         """Move source coordinates from a rescaled and/or mirrored search pass back to the original image."""
         x = self.src_xy[:, 0].astype(np.float64)
         if mirrored:
-            x = pass_width - self.patch_size - x
+            x = pass_width - self.patch_sizes - x
         self.src_xy = np.stack([np.round(x / scale), np.round(self.src_xy[:, 1] / scale)], axis=1).astype(np.int64)
         self.mirrored[:] = mirrored
         self.source_scale[:] = scale
