@@ -183,7 +183,11 @@ Get current engine configuration.
   "min_probability": 0.01,
   "max_nfa": 1.0,
   "pyramid_enabled": true,
-  "coherence_enabled": true
+  "coherence_enabled": true,
+  "flip_invariant": false,
+  "query_scales": [1.0],
+  "rotation_invariant": false,
+  "thorough": false
 }
 ```
 

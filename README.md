@@ -1,6 +1,8 @@
 # SPADE
 
-Sub-Patch Analysis & Detection Engine - finds where a small region of an image was copied from, across a collection of images, even after recoloring and JPEG recompression. Every reported region comes with a significance score (an a-contrario NFA) you can put in a report.
+Sub-Patch Analysis & Detection Engine - finds where a small region of an image was copied from, across a collection of images or within one image, even after recoloring, JPEG recompression and shrinking. Every reported region comes with a significance score (an a-contrario NFA) you can put in a report.
+
+The default search covers the common edits and is quick; `--thorough` also checks mirrored, enlarged and rotated copies at about 13x the time (see [Quick or Thorough](#quick-or-thorough)).
 
 ## Install
 
@@ -66,6 +68,9 @@ spade match source.jpg target.jpg
 
 # With options: patch size, heatmap, JSON forensic report
 spade match source.jpg target.jpg -p 6 -o heatmap.png -j report.json -v
+
+# Also check mirrored, enlarged and rotated copies (slower)
+spade match source.jpg target.jpg --thorough
 
 # Index a directory (writes myindex.index, myindex.meta.json, myindex.engine.json;
 # with --thorough also myindex.rotated.*)
@@ -213,7 +218,8 @@ the index. The pieces can also be switched on one by one
 query, so a fragment that was flipped before pasting is found
 (`Match.mirrored`, `CoherentRegion.mirrored`). On photo splices where half the
 fragments are mirrored it doubles recall (0.45 -> 0.90); on copy-move in real
-photos it adds no false alarms. It doubles search time.
+photos it adds no false alarms. It takes about 1.5x as long (the mirrored pass
+runs on a second thread).
 
 #### Rotated Copies (experimental)
 
@@ -273,9 +279,9 @@ engine = ForensicsEngine(config)
 The pyramid only covers copies that got smaller. For copies that were enlarged,
 `query_scales=[1.0, 0.75, 0.5]` also searches the questioned image shrunk to
 those sizes. Each extra scale is another full search, and the NFA is
-multiplied by the number of passes. On 14 resized CASIA v2 splices it found 5
-instead of 4 (mean IoU 0.12 -> 0.19) and took 1.7x as long, so it's off by
-default.
+multiplied by the number of passes. On 40 + 40 CASIA v2 pairs it raised the
+share of splices found from 47.5% to 50% (57.5% at NFA < 1) at over 4x the
+time, so it's off by default and part of `thorough`.
 
 #### Heatmap and Report
 
@@ -442,20 +448,30 @@ spec:
 
 ## How it works
 
-1. Extract every patch (default 5x5) and drop flat ones.
+1. Extract every patch (default 5x5) and drop flat ones. Targets are also
+   indexed at 3/4 and 1/2 size, for copies that were shrunk.
 2. Describe each patch by its normalized luminance pattern: grey levels minus
    their mean, scaled to unit length. Brightness and contrast drop out, and mild
    color grades barely move it. Luminance is used because JPEG keeps it at full
    resolution while it subsamples color.
-3. Exact nearest-neighbour search (FAISS), batched.
+3. Nearest-neighbour search (FAISS): exact for small collections, a compressed
+   inverted-file index past 50,000 patches.
 4. Per-patch pre-filter: fit grey-level gain and offset, chi-square test the
-   residual. Pixels clipped at 0 or 255 are ignored, since a recolor that
+   residual, with the noise level read from the JPEG quantization tables when
+   there are any. Pixels clipped at 0 or 255 are ignored, since a recolor that
    saturates breaks the model there.
-5. Cluster the surviving matches by translation, per target image and scale.
+5. Cluster the surviving matches by translation, per target image and scale,
+   and (across images) split each cluster into spatially connected parts, so
+   chance matches elsewhere at the same offset don't dilute a real copy.
 6. For each cluster, fit one 3x3 color transform over all its pixels, keep the
    patches whose luminance agrees with it, and compute the region's NFA:
    how many regions this consistent you'd expect by chance, given how often
-   patches matched at all.
+   patches matched at all and how many regions were tried (offsets, positions,
+   region sizes, scales, passes).
+
+`thorough` repeats this on the mirrored and shrunk questioned image, and runs a
+second search that compares patches as rotation-invariant rings; all of it is
+counted in the NFA.
 
 Handles brightness, contrast, color grading (any affine color transform),
 JPEG recompression and, with the pyramid, downscaled copies; mirrored, enlarged
@@ -529,8 +545,8 @@ over 4x as long, so it stays opt-in.
 | CoMoFoD scaling (25 + 25) | 16% | 16% | 8% |
 | COVERAGE (100 + 100) | 31% | 33% | 3% |
 
-Copy-move is the harder task. Rotated and rescaled copies need the
-experimental `rotation_invariant` mode or aren't handled yet, and the clean
+Copy-move is the harder task. Rotated and rescaled copies within one image
+aren't handled yet (rotation mode works across images only), and the clean
 images in CoMoFoD and COVERAGE are full of objects that genuinely repeat
 (identical printed logos, rows of windows, similar-but-genuine objects by
 design in COVERAGE). Those are real duplicates as far as pixels go, and SPADE
@@ -543,13 +559,18 @@ parts finds many more copies (CoMoFoD translation 40% -> 84%) but also flags
 
 ```
 src/spade/
-    extraction/    # patch extraction, entropy, image pyramids
+    extraction/    # patch extraction, entropy, image pyramids, rotation rings
     descriptors/   # luminance-pattern descriptor
-    search/        # FAISS index (exact, with real deletes)
-    verification/  # affine color fit, chi-square test, coherence, NFA
-    aggregation/   # heatmap, localization
-    bench/         # synthetic benchmark
+    search/        # FAISS index (exact or IVF-PQ, with real deletes)
+    verification/  # affine color fit, chi-square test, coherence, NFA, FDR
+    aggregation/   # heatmap, localization, match lists
+    bench/         # datasets (synthetic, photos, CASIA v2, COVERAGE, CoMoFoD),
+                   # calibration, baselines, downloader
     engine.py      # main API
+    jpeg.py        # noise level from JPEG quantization tables
+    scale.py       # native-scale cue for the report
+    provenance.py  # which images share copied regions
+    visual.py      # HTML report
     report.py      # versioned JSON forensic report
     cli.py         # command line interface
     api.py         # REST API (FastAPI)
