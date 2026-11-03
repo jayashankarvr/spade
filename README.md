@@ -247,7 +247,11 @@ default because it is slower (about 20 s per 192 px pair) and has limits:
   any angle raise alarms on over a third of clean photos, and a version
   comparing whole rigid transforms didn't separate the two on our test
   images. Cross-image search (a rotated fragment from another image) is
-  what this mode handles.
+  what this mode handles. Switched on by hand for copy-move, it also raises
+  more alarms on clean images: on CoMoFoD (25 copies + 25 originals each) it
+  found 28% of rotated copies with 1 original flagged, and 36% of plain
+  translated copies with 2 originals flagged, where the default finds 40% and
+  flags none. `thorough` leaves it out of copy-move for that reason.
 
 #### Large Collections
 
