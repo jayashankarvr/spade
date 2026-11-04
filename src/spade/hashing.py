@@ -300,14 +300,14 @@ def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
 
     Rows are ``algorithm,hash,id``, ``hash,id`` or just ``hash``; the last two
     need ``algorithm``. A header line, blank lines, CRLF endings, upper-case hex
-    and a UTF-8 BOM are all fine. Rows without an id are numbered 1, 2, ... in
-    file order. A bad row raises ValueError naming its line.
+    and a UTF-8 BOM are all fine. Rows without an id get their line number
+    in the file as id. A bad row raises ValueError naming its line.
     """
     algos: List[str] = []
     hexes: List[str] = []
     ids: List[str] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
+        reader = csv.reader(f, skipinitialspace=True)
         first = True
         for row in reader:
             row = [cell.strip() for cell in row]
@@ -324,7 +324,7 @@ def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
                 name, value, ident = row[0].lower(), row[1], row[2]
             else:
                 name, value = algorithm, row[0]
-                ident = row[1] if len(row) == 2 else str(len(hexes) + 1)
+                ident = row[1] if len(row) == 2 else str(line)
                 if name is None:
                     raise ValueError(
                         f"{path}, line {line}: no algorithm column and none given; pass algorithm="

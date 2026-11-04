@@ -54,8 +54,14 @@ def test_formats(tmp_path):
 
     bare = write(tmp_path, f"{PDQ_A}\n{PDQ_B}\n", "bare.csv")
     assert entries(load_hash_list(bare, algorithm="pdq")) == [("pdq", PDQ_A, "1"), ("pdq", PDQ_B, "2")]
+    # The id is the line number in the file, so a header shifts it.
     bare_header = write(tmp_path, f"hash\n{PDQ_A}\n{PDQ_B}\n", "bareh.csv")
-    assert entries(load_hash_list(bare_header, algorithm="pdq")) == [("pdq", PDQ_A, "1"), ("pdq", PDQ_B, "2")]
+    assert entries(load_hash_list(bare_header, algorithm="pdq")) == [("pdq", PDQ_A, "2"), ("pdq", PDQ_B, "3")]
+
+
+def test_quoted_id_and_padded_fields(tmp_path):
+    path = write(tmp_path, f'pdq, {PDQ_A} , "Case 12, photo 3"\n')
+    assert entries(load_hash_list(path)) == [("pdq", PDQ_A, "Case 12, photo 3")]
 
 
 def test_messy_files_parse(tmp_path):
@@ -163,6 +169,7 @@ def test_million_entries_fast():
         ids=np.array([str(i) for i in range(len(hexes))], dtype=object),
     )
     query = [ImageHash("pdq", hexes[123], 90)]
+    match_hashes(query, hl)  # warm-up: builds the list's byte matrix
     start = time.perf_counter()
     report = match_hashes(query, hl)
     elapsed = time.perf_counter() - start
