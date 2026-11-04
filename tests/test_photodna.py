@@ -100,7 +100,7 @@ def test_service_error_hides_key(outcome, caplog):
     assert KEY not in str(exc.value)
     assert KEY not in repr(exc.value)
     assert KEY not in caplog.text
-    assert exc.value.__cause__ is None or KEY not in str(exc.value.__cause__)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
 
 
 def test_http_500_mentions_status():
@@ -159,3 +159,48 @@ def test_cli_service_error_exits_cleanly():
         result = run(str(IMAGE), "--algorithm", "photodna")
     assert result.exit_code != 0
     assert "HTTP 500" in result.output
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://photodna.example.test/Match",
+    "ftp://photodna.example.test/Match",
+    "photodna.example.test/Match",
+    f"https://user:{KEY}@photodna.example.test/Match",
+    "https://user@photodna.example.test/Match",
+])
+def test_bad_endpoint_refused(endpoint):
+    with pytest.raises(PhotoDnaError) as exc:
+        PhotoDnaClient(key=KEY, endpoint=endpoint)
+    assert KEY not in str(exc.value)
+
+
+def test_bad_endpoint_from_environment_refused(monkeypatch):
+    monkeypatch.setenv("SPADE_PHOTODNA_ENDPOINT", "http://photodna.example.test/Match")
+    with pytest.raises(PhotoDnaError):
+        PhotoDnaClient(key=KEY)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:8080/Match", "http://localhost/Match", "http://[::1]:9/Match",
+    "https://photodna.example.test/Match",
+])
+def test_good_endpoint_accepted(endpoint):
+    assert PhotoDnaClient(key=KEY, endpoint=endpoint).endpoint == endpoint
+
+
+def test_redirect_refused():
+    client = PhotoDnaClient(key=KEY, endpoint=ENDPOINT)
+    with patch("requests.post", return_value=response(302, json_error=ValueError())) as post:
+        with pytest.raises(PhotoDnaError, match="302") as exc:
+            client.match(b"img")
+    assert post.call_args.kwargs["allow_redirects"] is False
+    assert KEY not in str(exc.value)
+
+
+def test_cli_announces_upload_on_stderr():
+    fake = MagicMock()
+    fake.match.return_value = {"IsMatch": False}
+    with patch.object(photodna, "PhotoDnaClient", return_value=fake):
+        result = CliRunner().invoke(cli, ["hash", str(IMAGE), "-a", "photodna"])
+    assert f"Sending {IMAGE} to the PhotoDNA Cloud Service" in result.stderr
+    assert "Sending" not in result.stdout

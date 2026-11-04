@@ -25,6 +25,7 @@ import base64
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -41,6 +42,26 @@ class PhotoDnaError(Exception):
     """The PhotoDNA service can't be used, or it didn't give a usable answer."""
 
 
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _check_endpoint(endpoint: str) -> None:
+    """Refuse endpoints that would send the key or image somewhere unsafe."""
+    try:
+        parts = urlsplit(endpoint)
+        host = parts.hostname
+    except ValueError:
+        raise PhotoDnaError("The PhotoDNA endpoint isn't a valid URL") from None
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise PhotoDnaError("The PhotoDNA endpoint must not contain a user name or password")
+    if parts.scheme == "https" and host:
+        return
+    if parts.scheme == "http" and host in _LOCAL_HOSTS:
+        return
+    raise PhotoDnaError("The PhotoDNA endpoint must be an https:// URL "
+                        "(plain http is only allowed for localhost)")
+
+
 class PhotoDnaClient:
     """Sends images to the PhotoDNA Cloud Service Match call."""
 
@@ -53,8 +74,10 @@ class PhotoDnaClient:
                 f"Microsoft takes applications at {APPLY_URL}. Once you have a key, "
                 "set it in the SPADE_PHOTODNA_KEY environment variable."
             )
+        endpoint = endpoint or os.environ.get("SPADE_PHOTODNA_ENDPOINT") or DEFAULT_ENDPOINT
+        _check_endpoint(endpoint)
         self._key = key
-        self.endpoint = endpoint or os.environ.get("SPADE_PHOTODNA_ENDPOINT") or DEFAULT_ENDPOINT
+        self.endpoint = endpoint
         self.timeout = timeout
 
     def __repr__(self):
@@ -68,7 +91,7 @@ class PhotoDnaClient:
             # The exceptions requests raises can echo request details, so only
             # their type is reported, never their text.
             r = requests.post(self.endpoint, headers={KEY_HEADER: self._key},
-                              json=body, timeout=self.timeout)
+                              json=body, timeout=self.timeout, allow_redirects=False)
         except requests.Timeout:
             log.warning("PhotoDNA request timed out after %ss", self.timeout)
             raise PhotoDnaError(f"PhotoDNA service didn't answer within {self.timeout:g} seconds") from None
@@ -81,12 +104,17 @@ class PhotoDnaClient:
             verdict = r.json()
         except ValueError:
             verdict = None
+        if 300 <= status < 400:
+            # Following a redirect could forward the key and image to another host.
+            log.warning("PhotoDNA service returned a redirect (HTTP %s)", status)
+            raise PhotoDnaError(f"PhotoDNA service answered with a redirect (HTTP {status}); "
+                                "check the endpoint") from None
         if status >= 400:
             log.warning("PhotoDNA service returned HTTP %s", status)
             hint = " (check the subscription key)" if status in (401, 403) else ""
-            raise PhotoDnaError(f"PhotoDNA service returned HTTP {status}{hint}")
+            raise PhotoDnaError(f"PhotoDNA service returned HTTP {status}{hint}") from None
         if not isinstance(verdict, dict):
             log.warning("PhotoDNA service returned something that isn't JSON")
             raise PhotoDnaError("PhotoDNA service returned a response that isn't JSON "
-                                "(an error page, perhaps); check the endpoint")
+                                "(an error page, perhaps); check the endpoint") from None
         return verdict

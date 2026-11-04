@@ -415,6 +415,7 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
                 raise click.ClickException(str(e))
         verdict = None
         if photodna_client is not None:
+            click.echo(f"Sending {path} to the PhotoDNA Cloud Service", err=True)
             try:
                 with open(path, "rb") as f:
                     verdict = photodna_client.match(f.read())
