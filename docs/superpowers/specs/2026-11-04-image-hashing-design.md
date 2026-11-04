@@ -156,5 +156,9 @@ search for those. CHANGELOG entry; `docs/API.md` entry for `/hash`.
 
 - Other hash families (aHash, dHash, wavelet hash, TMK video hashes).
 - Running SPADE's region match automatically on list hits.
+- Hashing sub-regions of an image (e.g. to find a known image pasted into a
+  collage or screenshot). Shared lists hold whole-image hashes, so it would
+  mean hashing a grid of windows with a threshold corrected for the number of
+  windows, checked on a collage benchmark. Possible later, if needed.
 - Hash databases larger than memory or indexed search (FAISS binary index);
   revisit beyond ~10 million entries.
