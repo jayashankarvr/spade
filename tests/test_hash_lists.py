@@ -176,3 +176,9 @@ def test_million_entries_fast():
     print(f"million-entry match_hashes: {elapsed:.3f}s")
     assert [m.id for m in report.matches] == ["123"]
     assert elapsed < 1.0
+
+
+def test_oversized_field_is_value_error(tmp_path):
+    big = write(tmp_path, f"pdq,{PDQ_A},a\npdq,{PDQ_A},{'x' * 200_000}\n", "big.csv")
+    with pytest.raises(ValueError, match=r"big\.csv, line 2"):
+        load_hash_list(big)

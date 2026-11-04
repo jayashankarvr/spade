@@ -186,3 +186,13 @@ def test_hash_endpoint_rejects_bad_upload():
     client = TestClient(create_app())
     r = client.post("/hash", files={"file": ("x.png", b"not an image", "image/png")})
     assert r.status_code == 400
+
+
+def test_hash_endpoint_nothing_installed():
+    client = TestClient(create_app())
+    from spade import hashing
+    with mock.patch.dict(sys.modules, {"pdqhash": None, "imagehash": None}), \
+            mock.patch.object(hashing, "_load_phash_lib", return_value=None):
+        r = client.post("/hash", files={"file": _bridge()})
+    assert r.status_code == 501
+    assert "pip install spade-forensics[hash]" in r.json()["detail"]

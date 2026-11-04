@@ -464,7 +464,7 @@ it, so every algorithm here comes from its reference library:
 
 | Algorithm | What it is | Bits | Comes from | Match at distance |
 |---|---|---|---|---|
-| `pdq` | Meta's PDQ, the format of ThreatExchange lists | 256 | `pdqhash` (Meta's C++), `pip install spade-forensics[hash]` | 31 or less |
+| `pdq` | Meta's PDQ, the format of ThreatExchange lists | 256 | `pdqhash` (MIT, bundling Meta's BSD C++), `pip install spade-forensics[hash]` | 31 or less |
 | `phash` | DCT pHash as computed by the Python `imagehash` library | 64 | `imagehash`, same extra | 10 or less |
 | `phash-lib` | `ph_dct_imagehash` from libpHash (phash.org), for databases built with the C library | 64 | your own libpHash install | 10 or less |
 | `photodna` | Microsoft PhotoDNA | - | Microsoft's PhotoDNA Cloud Service | decided by the service |
@@ -532,8 +532,10 @@ Meta publishes for PDQ, and we keep it. The one
 miss is the brick photo halved in size (58 bits): it is an even, fine texture
 with little large-scale structure, and PDQ's hash of such an image changes a
 lot when it is shrunk, whatever resampling filter is used. Ordinary photos
-stayed under 31. The benchmark is small, so treat these numbers as a sanity
-check rather than error rates; `--max-distance` changes the cutoff. The
+stayed under 31. Some tools (python-threatexchange, HMA) hash the full image
+without the 512 px downsample SPADE applies, so their hashes of large images can
+differ from SPADE's by a few bits, well inside 31. The benchmark is small, so
+treat these numbers as a sanity check rather than error rates; `--max-distance` changes the cutoff. The
 `phash-lib` default copies `phash`'s; it hasn't been measured, because
 libpHash isn't installed where these were run.
 
@@ -542,7 +544,7 @@ libpHash isn't installed where these were run.
 Perceptual hashes describe the whole picture, so they fail when the picture as
 a whole changes: cropping, rotation by angles other than 90 degrees, and
 large local edits such as pasting in or removing a big object. Even a 5% crop
-put all 13 photos above past the PDQ threshold, and 2 of them past the pHash
+pushed all 13 photos above past the PDQ threshold, and 2 of them past the pHash
 one. Rotations by 90 degrees and mirror images match only with
 `--thorough`. For those cases, and for finding where part of an image came
 from, use `spade match` and `spade search`, which compare regions rather than
@@ -550,8 +552,8 @@ whole images.
 
 ### Licensing and privacy
 
-- `pdqhash` and `imagehash` are BSD-licensed and installed with the `hash`
-  extra.
+- `pdqhash` (MIT, bundling Meta's BSD C++) and `imagehash` (BSD) are installed
+  with the `hash` extra.
 - libpHash is GPLv3. SPADE is Apache-2.0 and doesn't ship it or link to it at
   build time; `phash-lib` only works if you install libpHash yourself (for
   example `apt install libphash0`, or set `SPADE_PHASH_LIB` to the `.so`).

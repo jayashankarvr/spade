@@ -204,3 +204,12 @@ def test_cli_announces_upload_on_stderr():
         result = CliRunner().invoke(cli, ["hash", str(IMAGE), "-a", "photodna"])
     assert f"Sending {IMAGE} to the PhotoDNA Cloud Service" in result.stderr
     assert "Sending" not in result.stdout
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://localhost.evil.com/Match",
+    "http://127.0.0.1@evil.com/Match",
+])
+def test_lookalike_loopback_hosts_refused(endpoint):
+    with pytest.raises(PhotoDnaError):
+        PhotoDnaClient(key=KEY, endpoint=endpoint)

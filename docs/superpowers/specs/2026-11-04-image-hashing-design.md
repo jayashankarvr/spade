@@ -18,7 +18,7 @@ from?".
 
 | name | what | bits | implementation | how it's obtained | default match distance |
 |---|---|---|---|---|---|
-| `pdq` | Meta's PDQ | 256 | `pdqhash` (BSD), wraps Meta's reference C++ | optional extra `spade-forensics[hash]` | 31 (PDQ's published threshold) |
+| `pdq` | Meta's PDQ | 256 | `pdqhash` (MIT, bundling Meta's BSD C++) | optional extra `spade-forensics[hash]` | 31 (PDQ's published threshold) |
 | `phash` | DCT pHash as in the Python `imagehash` library | 64 | `imagehash` (BSD) | optional extra `spade-forensics[hash]` | 10 |
 | `phash-lib` | `ph_dct_imagehash` from libpHash (phash.org) | 64 | the user's own libpHash install, called through `ctypes` | installed separately by the user: libpHash is GPLv3, so SPADE (Apache-2.0) never ships or bundles it | 10 |
 | `photodna` | Microsoft PhotoDNA | - | Microsoft's PhotoDNA Cloud Service | the user's own PhotoDNA licence and API key | decided by the service |

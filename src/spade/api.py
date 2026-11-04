@@ -454,7 +454,7 @@ def create_app(config: Optional[Config] = None, hash_list_path: Optional[str] = 
         PhotoDNA Cloud Service and only works when the operator has set
         SPADE_PHOTODNA_KEY on the server.
         """
-        from spade.hashing import available_algorithms, hash_image, match_hashes
+        from spade.hashing import LOCAL_ALGORITHMS, available_algorithms, hash_image, match_hashes
 
         names = []
         for name in algorithm or []:
@@ -463,13 +463,19 @@ def create_app(config: Optional[Config] = None, hash_list_path: Optional[str] = 
                 names.append(name)
         use_photodna = "photodna" in names
         names = [n for n in names if n != "photodna"]
-        unknown = [n for n in names if n not in ("pdq", "phash", "phash-lib")]
+        unknown = [n for n in names if n not in LOCAL_ALGORITHMS]
         if unknown:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown algorithm '{unknown[0]}'; choose from: pdq, phash, phash-lib, photodna")
         if not algorithm:
             names = available_algorithms()
+            if not names:
+                raise HTTPException(
+                    status_code=501,
+                    detail="No hash algorithm is installed on the server: "
+                           "pip install spade-forensics[hash]",
+                )
 
         client = None
         if use_photodna:

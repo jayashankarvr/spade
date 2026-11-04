@@ -373,7 +373,8 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
 
     from spade.exceptions import DependencyError
     from spade.hashing import (
-        MissingAlgorithmError, available_algorithms, hash_image, load_hash_list, match_hashes,
+        LOCAL_ALGORITHMS, MissingAlgorithmError, available_algorithms, hash_image,
+        load_hash_list, match_hashes,
     )
 
     local = available_algorithms()
@@ -388,11 +389,15 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         for n in (local if name == "all" else [name]):
             if n not in names:
                 names.append(n)
-    # An unavailable phash-lib is reported by hash_image with install advice.
-    known = set(local) | {"phash-lib"}
+    # A named algorithm that isn't installed gets its install hint from hash_image.
+    known = set(LOCAL_ALGORITHMS)
     for n in names:
         if n not in known:
             raise click.ClickException(f"Unknown algorithm '{n}'; choose from: {', '.join(sorted(known))}, all")
+    if not names and not use_photodna:
+        raise click.ClickException(
+            "No hash algorithm is installed here: pip install spade-forensics[hash]"
+        )
 
     # A list without an algorithm column holds hashes of the one algorithm named.
     named = {a.lower() for a in algorithms}
@@ -406,6 +411,14 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         )
     except (ValueError, OSError) as e:
         raise click.ClickException(f"Can't read hash list: {e}")
+
+    # Open the output first so a bad path fails before any image is sent anywhere.
+    out_file = None
+    if json_output:
+        try:
+            out_file = open(json_output, "w")
+        except OSError as e:
+            raise click.ClickException(f"Can't write {json_output}: {e}")
 
     photodna_client = None
     if use_photodna:
@@ -451,9 +464,17 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
             click.echo(f"{path} photodna {json.dumps(verdict, sort_keys=True)}")
         if result is not None:
             for m in result.matches:
-                click.echo(f"  match {m.id} ({m.algorithm}) distance={m.distance} variant={m.variant}")
+                # List ids come from a file we don't control.
+                ident = m.id if m.id.isprintable() else m.id.encode("unicode_escape").decode()
+                click.echo(f"  match {ident} ({m.algorithm}) distance={m.distance} variant={m.variant}")
             if not result.matches:
-                click.echo("  no match")
+                compared = len(hashes) - len(result.skipped_low_quality)
+                if compared > 0:
+                    click.echo("  no match")
+                elif hashes:
+                    click.echo(f"  not compared (all hashes below quality {min_quality})")
+                else:
+                    click.echo("  no local hashes to compare")
             seen = {(h.algorithm, h.quality) for h in result.skipped_low_quality}
             for algo, quality in sorted(seen):
                 click.echo(f"  skipped {algo} hash: quality {quality} is below {min_quality}")
@@ -478,8 +499,8 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         for entry, (_, _, _, verdict) in zip(doc["images"], report):
             if verdict is not None:
                 entry["photodna"] = verdict
-        with open(json_output, "w") as f:
-            json.dump(doc, f, indent=2)
+        with out_file:
+            json.dump(doc, out_file, indent=2)
 
 
 @cli.command()
@@ -517,10 +538,9 @@ def serve(
     click.echo(f"Starting SPADE API server on {host}:{port}")
     click.echo(f"  Patch size: {config.patch_size}")
     click.echo(f"  Pyramid: {'enabled' if config.pyramid_enabled else 'disabled'}")
-    click.echo(f"\nAPI documentation: http://localhost:{port}/docs\n")
-
     if hash_list:
         click.echo(f"  Hash list: {hash_list}")
+    click.echo(f"\nAPI documentation: http://localhost:{port}/docs\n")
 
     try:
         run_server(host=host, port=port, config=config, hash_list_path=hash_list)

@@ -129,8 +129,8 @@ def test_hamming():
 
 def test_bits_packed():
     h = ImageHash("phash", "80" + "00" * 7, None)
-    assert h.bits.dtype == np.uint8 and h.bits.shape == (8,)
-    assert h.bits[0] == 0x80
+    assert h.packed.dtype == np.uint8 and h.packed.shape == (8,)
+    assert h.packed[0] == 0x80
 
 
 def test_unknown_and_photodna(original):
@@ -315,3 +315,34 @@ def test_unrelated_photos_beyond_distance(robustness):
     _, unrelated = robustness
     for (algo, a, b), d in unrelated.items():
         assert d > DEFAULT_DISTANCE[algo], (algo, a, b, d)
+
+
+def test_dihedral_images_accepts_2d():
+    gray = np.arange(12, dtype=np.uint8).reshape(3, 4)
+    variants = dihedral_images(gray)
+    assert len(variants) == 8
+    assert all(v.ndim == 3 and v.shape[2] == 3 for v in variants)
+
+
+def test_out_of_range_pixels_refused():
+    from spade.hashing import _as_rgb
+
+    for bad in (np.full((4, 4, 3), 300.0), np.full((4, 4, 3), -1.0), np.full((4, 4, 3), np.nan)):
+        with pytest.raises(ValueError, match="0..255"):
+            _as_rgb(bad)
+    ok = _as_rgb(np.full((4, 4, 3), 255.0))
+    assert ok.dtype == np.uint8 and ok.max() == 255
+
+
+def test_popcount_table_matches_bitwise_count():
+    from spade import hashing
+
+    if not hasattr(np, "bitwise_count"):
+        pytest.skip("numpy has no bitwise_count")
+    rng = np.random.default_rng(3)
+    packed = rng.integers(0, 256, (20, 32), dtype=np.uint8)
+    query = rng.integers(0, 256, 32, dtype=np.uint8)
+    xor = np.bitwise_xor(packed, query)
+    table = hashing._POPCOUNT[xor].sum(axis=1, dtype=np.int64)
+    assert np.array_equal(table, np.bitwise_count(xor).sum(axis=1, dtype=np.int64))
+    assert np.array_equal(table, hashing._distances(packed, query))

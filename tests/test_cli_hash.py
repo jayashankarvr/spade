@@ -148,3 +148,60 @@ def test_all_excludes_photodna():
     assert algos == set(available_algorithms())
     default = run(ORIGINAL)
     assert default.exit_code == 0 and "photodna" not in default.output.lower()
+
+
+def _nothing_installed(monkeypatch):
+    import sys
+
+    from spade import hashing
+    monkeypatch.setitem(sys.modules, "pdqhash", None)
+    monkeypatch.setitem(sys.modules, "imagehash", None)
+    monkeypatch.setattr(hashing, "_load_phash_lib", lambda: None)
+
+
+def test_named_algorithm_not_installed(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pdqhash", None)
+    result = run(ORIGINAL, "--algorithm", "pdq")
+    assert result.exit_code != 0
+    assert "pip install spade-forensics[hash]" in result.output
+    assert "Unknown algorithm" not in result.output
+
+
+def test_nothing_installed(monkeypatch):
+    _nothing_installed(monkeypatch)
+    result = run(ORIGINAL)
+    assert result.exit_code != 0
+    assert "pip install spade-forensics[hash]" in result.output
+
+
+def test_not_compared_when_quality_too_low(tmp_path):
+    from PIL import Image
+
+    flat = tmp_path / "flat.png"
+    Image.new("RGB", (64, 64), (128, 128, 128)).save(flat)
+    listing = write_list(tmp_path, "pdq," + "0" * 64 + ",other")
+    result = run(str(flat), "--algorithm", "pdq", "--against", listing)
+    assert result.exit_code == 0, result.output
+    assert "no match" not in result.output
+    assert "not compared (all hashes below quality 50)" in result.output
+
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", listing)
+    assert "  no match" in result.output
+
+
+def test_list_id_is_escaped(tmp_path):
+    path = tmp_path / "list.csv"
+    path.write_text("pdq," + expected_pdq("bridge-1-original.jpg") + ",evil\x1b[2Jid\n")
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", str(path))
+    assert result.exit_code == 0, result.output
+    assert "\x1b" not in result.output.replace("\\x1b", "")
+    assert "evil\\x1b[2Jid" in result.output
+
+
+def test_json_path_checked_before_hashing(tmp_path):
+    result = run(ORIGINAL, "--algorithm", "pdq", "--json", str(tmp_path / "missing-dir" / "out.json"))
+    assert result.exit_code != 0
+    assert "Can't write" in result.output
+    assert ORIGINAL not in result.output

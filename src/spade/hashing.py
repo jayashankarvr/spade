@@ -43,6 +43,9 @@ _PDQ_DOWNSAMPLE = 512
 
 _INSTALL_HINT = "pip install spade-forensics[hash]"
 
+# Every algorithm hashed in this process, whether or not its package is installed.
+LOCAL_ALGORITHMS = ("pdq", "phash", "phash-lib")
+
 
 @dataclass
 class ImageHash:
@@ -54,13 +57,14 @@ class ImageHash:
     variant: str = "original"
 
     @property
-    def bits(self) -> np.ndarray:
+    def packed(self) -> np.ndarray:
         """The hash as packed bytes, ``len(hex) // 2`` of them."""
         return np.frombuffer(bytes.fromhex(self.hex), dtype=np.uint8)
 
 
 def dihedral_images(image: np.ndarray) -> List[np.ndarray]:
     """The eight rotations and flips of an image, in ``VARIANTS`` order."""
+    image = _as_rgb(image)
     return [
         image,
         np.rot90(image, 1),
@@ -84,7 +88,11 @@ def _as_rgb(image: np.ndarray) -> np.ndarray:
     elif image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected a (H, W) or (H, W, 3) image, got shape {image.shape}")
     if image.dtype != np.uint8:
-        image = np.clip(image, 0, 255).astype(np.uint8)
+        # Values are pixel values on the 0..255 scale; anything else would be
+        # clipped into a different image and hashed without complaint.
+        if not (image.min() >= 0 and image.max() <= 255):
+            raise ValueError("pixel values must be within 0..255")
+        image = image.astype(np.uint8)
     return np.ascontiguousarray(image)
 
 
@@ -94,7 +102,6 @@ def _bits_to_hex(bits: np.ndarray) -> str:
 
 class _Pdq:
     name = "pdq"
-    bits = 256
 
     def compute(self, image: np.ndarray, dihedral: bool) -> List[ImageHash]:
         try:
@@ -129,7 +136,6 @@ def _downsample(rgb: np.ndarray) -> np.ndarray:
 
 class _Phash:
     name = "phash"
-    bits = 64
 
     def compute(self, image: np.ndarray, dihedral: bool) -> List[ImageHash]:
         try:
@@ -195,7 +201,6 @@ class _PhashLib:
     """pHash's own DCT hash (``ph_dct_imagehash``), through the user's libpHash."""
 
     name = "phash-lib"
-    bits = 64
 
     def compute(self, image: np.ndarray, dihedral: bool) -> List[ImageHash]:
         hash_file = _load_phash_lib()
@@ -207,11 +212,11 @@ class _PhashLib:
         names = VARIANTS if dihedral else VARIANTS[:1]
         out = []
         for img, variant in zip(images, names):
-            # The library only reads files; PNG keeps the pixels exact.
-            fd, path = tempfile.mkstemp(suffix=".png")
+            # The library only reads files. PPM is lossless and CImg reads it natively.
+            fd, path = tempfile.mkstemp(suffix=".ppm")
             os.close(fd)
             try:
-                Image.fromarray(np.ascontiguousarray(img)).save(path, format="PNG")
+                Image.fromarray(np.ascontiguousarray(img)).save(path, format="PPM")
                 value = ctypes.c_uint64()
                 if hash_file(os.fsencode(path), ctypes.byref(value)) != 0:
                     raise RuntimeError(f"libpHash couldn't hash the image (variant '{variant}')")
@@ -311,6 +316,14 @@ class MissingAlgorithmError(ValueError):
         self.line = line
 
 
+def _read_rows(reader, path):
+    """Rows of a csv reader; a csv.Error (e.g. an oversized field) becomes a ValueError."""
+    try:
+        yield from reader
+    except csv.Error as e:
+        raise ValueError(f"{path}, line {reader.line_num}: {e}") from e
+
+
 def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
     """Read a CSV hash list.
 
@@ -325,7 +338,7 @@ def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f, skipinitialspace=True)
         first = True
-        for row in reader:
+        for row in _read_rows(reader, path):
             row = [cell.strip() for cell in row]
             if not any(row):
                 continue
@@ -424,9 +437,9 @@ def match_hashes(
         if found is None:
             continue
         indices, packed = found
-        if packed.shape[1] != len(h.bits):
+        if packed.shape[1] != len(h.packed):
             continue
-        dist = _distances(packed, h.bits)
+        dist = _distances(packed, h.packed)
         for pos in np.flatnonzero(dist <= limit):
             idx = int(indices[pos])
             d = int(dist[pos])

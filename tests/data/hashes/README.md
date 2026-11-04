@@ -14,3 +14,9 @@ The full text is in `LICENSE-ThreatExchange` next to these files.
 
 The images are numbered in Meta's dihedral order: original, rotate 90, rotate
 180, rotate 270, flip x, flip y, flip +1 (diagonal), flip -1 (anti-diagonal).
+
+## pHash
+
+`imagehash` publishes no fixed hash vectors: the installed package (4.3.2)
+ships no test data or expected hashes. The `phash` tests therefore check
+SPADE's output against `imagehash.phash` run directly on the same pixels.
