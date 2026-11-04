@@ -6,12 +6,13 @@ re-implements an algorithm. The libraries are optional, installed with
 it is used only if the user installed it themselves.
 """
 
+import csv
 import ctypes
 import ctypes.util
 import functools
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -261,3 +262,165 @@ def hamming(a: Union[ImageHash, str], b: Union[ImageHash, str]) -> int:
     if len(ha) != len(hb):
         raise ValueError(f"hash lengths differ ({len(ha)} vs {len(hb)} hex digits)")
     return bin(int(ha, 16) ^ int(hb, 16)).count("1")
+
+
+# Hex digits in a list entry, per algorithm that is matched locally.
+_HEX_LENGTH = {"pdq": 64, "phash": 16, "phash-lib": 16}
+
+
+@dataclass
+class HashList:
+    """Known hashes to match against: parallel arrays of algorithm, hex and id."""
+
+    algorithms: np.ndarray
+    hexes: np.ndarray
+    ids: np.ndarray
+    # Per-algorithm (row indices, packed byte matrix), built on first use.
+    _matrices: Dict[str, tuple] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def __len__(self) -> int:
+        return len(self.hexes)
+
+    def matrix(self, algorithm: str) -> Optional[tuple]:
+        """``(indices, packed)`` for one algorithm, or None if the list has none."""
+        if algorithm not in self._matrices:
+            indices = np.flatnonzero(self.algorithms == algorithm)
+            if len(indices) == 0:
+                self._matrices[algorithm] = None
+            else:
+                width = _HEX_LENGTH[algorithm] // 2
+                raw = bytes.fromhex("".join(self.hexes[indices]))
+                packed = np.frombuffer(raw, dtype=np.uint8).reshape(len(indices), width)
+                self._matrices[algorithm] = (indices, packed)
+        return self._matrices[algorithm]
+
+
+def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
+    """Read a CSV hash list.
+
+    Rows are ``algorithm,hash,id``, ``hash,id`` or just ``hash``; the last two
+    need ``algorithm``. A header line, blank lines, CRLF endings, upper-case hex
+    and a UTF-8 BOM are all fine. Rows without an id are numbered 1, 2, ... in
+    file order. A bad row raises ValueError naming its line.
+    """
+    algos: List[str] = []
+    hexes: List[str] = []
+    ids: List[str] = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        first = True
+        for row in reader:
+            row = [cell.strip() for cell in row]
+            if not any(row):
+                continue
+            line = reader.line_num
+            if first:
+                first = False
+                if row[0].lower() in ("algorithm", "hash"):
+                    continue
+            if len(row) > 3:
+                raise ValueError(f"{path}, line {line}: expected at most 3 columns, got {len(row)}")
+            if len(row) == 3:
+                name, value, ident = row[0].lower(), row[1], row[2]
+            else:
+                name, value = algorithm, row[0]
+                ident = row[1] if len(row) == 2 else str(len(hexes) + 1)
+                if name is None:
+                    raise ValueError(
+                        f"{path}, line {line}: no algorithm column and none given; pass algorithm="
+                    )
+                name = name.lower()
+            if name != "photodna":
+                if name not in _HEX_LENGTH:
+                    raise ValueError(f"{path}, line {line}: unknown algorithm '{name}'")
+                value = value.lower()
+                if len(value) != _HEX_LENGTH[name]:
+                    raise ValueError(
+                        f"{path}, line {line}: a {name} hash has {_HEX_LENGTH[name]} hex digits, "
+                        f"got {len(value)}"
+                    )
+                if any(c not in "0123456789abcdef" for c in value):
+                    raise ValueError(f"{path}, line {line}: '{value}' isn't hex")
+            algos.append(name)
+            hexes.append(value)
+            ids.append(ident)
+    return HashList(
+        algorithms=np.array(algos, dtype=object),
+        hexes=np.array(hexes, dtype=object),
+        ids=np.array(ids, dtype=object),
+    )
+
+
+@dataclass
+class HashMatch:
+    """A list entry within range of one of the image's hashes."""
+
+    id: str
+    algorithm: str
+    hex: str
+    distance: int
+    variant: str
+
+
+@dataclass
+class MatchReport:
+    matches: List[HashMatch]
+    skipped_low_quality: List[ImageHash]
+
+
+_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+
+def _distances(packed: np.ndarray, query: np.ndarray) -> np.ndarray:
+    """Hamming distance from ``query`` to every row of ``packed``."""
+    xor = np.bitwise_xor(packed, query)
+    if hasattr(np, "bitwise_count"):  # numpy 2+
+        if xor.shape[1] % 8 == 0:
+            xor = xor.view(np.uint64)
+        return np.bitwise_count(xor).sum(axis=1, dtype=np.int64)
+    return _POPCOUNT[xor].sum(axis=1, dtype=np.int64)
+
+
+def match_hashes(
+    hashes: Sequence[ImageHash],
+    hash_list: HashList,
+    max_distance: Optional[int] = None,
+    min_quality: int = 50,
+) -> MatchReport:
+    """Find list entries within ``max_distance`` of any of the hashes, nearest first.
+
+    Only entries of the same algorithm are compared. ``max_distance`` defaults
+    to the algorithm's ``DEFAULT_DISTANCE``. Hashes with a quality below
+    ``min_quality`` are skipped (pHash has no quality and is never skipped).
+    An entry matched by several variants is reported once, at its closest.
+    """
+    skipped: List[ImageHash] = []
+    best: Dict[tuple, HashMatch] = {}
+    for h in hashes:
+        if h.quality is not None and h.quality < min_quality:
+            skipped.append(h)
+            continue
+        limit = max_distance if max_distance is not None else DEFAULT_DISTANCE.get(h.algorithm)
+        if limit is None or h.algorithm not in _HEX_LENGTH:
+            continue
+        found = hash_list.matrix(h.algorithm)
+        if found is None:
+            continue
+        indices, packed = found
+        if packed.shape[1] != len(h.bits):
+            continue
+        dist = _distances(packed, h.bits)
+        for pos in np.flatnonzero(dist <= limit):
+            idx = int(indices[pos])
+            d = int(dist[pos])
+            key = (h.algorithm, idx)
+            if key not in best or d < best[key].distance:
+                best[key] = HashMatch(
+                    id=str(hash_list.ids[idx]),
+                    algorithm=h.algorithm,
+                    hex=str(hash_list.hexes[idx]),
+                    distance=d,
+                    variant=h.variant,
+                )
+    matches = sorted(best.values(), key=lambda m: m.distance)
+    return MatchReport(matches=matches, skipped_low_quality=skipped)
