@@ -142,3 +142,29 @@ def test_missing_dependency(original):
     with mock.patch.dict(sys.modules, {"pdqhash": None}):
         with pytest.raises(DependencyError, match=r"spade-forensics\[hash\]"):
             hash_image(original, ["pdq"])
+
+
+def test_phash_lib_missing_is_clear(original):
+    with mock.patch("spade.hashing._load_phash_lib", return_value=None):
+        assert "phash-lib" not in available_algorithms()
+        with pytest.raises(DependencyError, match="GPLv3"):
+            hash_image(original, ["phash-lib"])
+
+
+def test_phash_lib_matches_library():
+    import ctypes
+
+    from spade.hashing import _load_phash_lib
+
+    lib = _load_phash_lib()
+    if lib is None:
+        pytest.skip("libpHash isn't installed")
+    assert "phash-lib" in available_algorithms()
+    for row in _expected():
+        path = DATA / row["filename"]
+        out = ctypes.c_uint64()
+        assert lib.ph_dct_imagehash(str(path).encode(), ctypes.byref(out)) == 0
+        got = hash_image(load_image(str(path)), ["phash-lib"])[0]
+        assert got.algorithm == "phash-lib"
+        assert got.quality is None
+        assert got.hex == f"{out.value:016x}"

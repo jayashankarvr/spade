@@ -1,10 +1,15 @@
-"""Perceptual image hashes: PDQ (Meta) and pHash (imagehash).
+"""Perceptual image hashes: PDQ (Meta), pHash (imagehash) and libpHash (optional).
 
 Every hash comes from the reference library (pdqhash, imagehash); nothing here
 re-implements an algorithm. The libraries are optional, installed with
-``pip install spade-forensics[hash]``.
+``pip install spade-forensics[hash]``. libpHash is GPLv3, so it is never bundled;
+it is used only if the user installed it themselves.
 """
 
+import ctypes
+import ctypes.util
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Union
 
@@ -138,12 +143,67 @@ class _Phash:
         ]
 
 
-_ALGORITHMS = {a.name: a for a in (_Pdq(), _Phash())}
+_PHASH_LIB_HINT = (
+    "libpHash isn't installed, so 'phash-lib' is unavailable. It is GPLv3 and "
+    "SPADE doesn't ship it; install it separately (e.g. apt install libphash0), "
+    "or point SPADE_PHASH_LIB at libpHash.so"
+)
+
+
+def _load_phash_lib() -> Optional[ctypes.CDLL]:
+    """The user's own libpHash, or None. ``SPADE_PHASH_LIB`` wins over the system search."""
+    path = os.environ.get("SPADE_PHASH_LIB") or ctypes.util.find_library("pHash")
+    if not path:
+        return None
+    try:
+        lib = ctypes.CDLL(path)
+        fn = lib.ph_dct_imagehash
+    except (OSError, AttributeError):
+        return None
+    fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64)]
+    fn.restype = ctypes.c_int
+    return lib
+
+
+class _PhashLib:
+    """pHash's own DCT hash (``ph_dct_imagehash``), through the user's libpHash."""
+
+    name = "phash-lib"
+    bits = 64
+
+    def compute(self, image: np.ndarray, dihedral: bool) -> List[ImageHash]:
+        lib = _load_phash_lib()
+        if lib is None:
+            raise DependencyError(_PHASH_LIB_HINT)
+
+        rgb = _as_rgb(image)
+        images = dihedral_images(rgb) if dihedral else [rgb]
+        names = VARIANTS if dihedral else VARIANTS[:1]
+        out = []
+        for img, variant in zip(images, names):
+            # The library only reads files; PNG keeps the pixels exact.
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            try:
+                Image.fromarray(np.ascontiguousarray(img)).save(path, format="PNG")
+                value = ctypes.c_uint64()
+                if lib.ph_dct_imagehash(os.fsencode(path), ctypes.byref(value)) != 0:
+                    raise RuntimeError(f"libpHash couldn't hash the image (variant '{variant}')")
+            finally:
+                os.remove(path)
+            out.append(ImageHash(self.name, f"{value.value:016x}", None, variant))
+        return out
+
+
+_ALGORITHMS = {a.name: a for a in (_Pdq(), _Phash(), _PhashLib())}
 
 
 def available_algorithms() -> List[str]:
     """Algorithms hashed in this process (never ``photodna``)."""
-    return list(_ALGORITHMS)
+    names = list(_ALGORITHMS)
+    if _load_phash_lib() is None:
+        names.remove("phash-lib")
+    return names
 
 
 def hash_image(
@@ -158,6 +218,8 @@ def hash_image(
     for name in algorithms:
         if name == "photodna":
             raise ValueError("photodna isn't hashed locally; use spade.photodna")
+        if name == "phash-lib" and _load_phash_lib() is None:
+            raise DependencyError(_PHASH_LIB_HINT)
         if name not in _ALGORITHMS:
             raise ValueError(f"unknown hash algorithm '{name}'; available: {available_algorithms()}")
         out.extend(_ALGORITHMS[name].compute(image, dihedral))
