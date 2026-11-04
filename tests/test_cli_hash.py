@@ -1,0 +1,131 @@
+"""Tests for the `spade hash` command."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("click")
+pytest.importorskip("pdqhash")
+pytest.importorskip("imagehash")
+
+from click.testing import CliRunner
+
+from spade.cli import cli
+from spade.hashing import available_algorithms
+
+DATA = Path(__file__).parent / "data" / "hashes"
+ORIGINAL = str(DATA / "bridge-1-original.jpg")
+ROTATED = str(DATA / "bridge-2-rotate-90.jpg")
+
+
+def expected_pdq(name):
+    for line in (DATA / "expected.csv").read_text().splitlines()[1:]:
+        filename, value, _ = line.split(",")
+        if filename == name:
+            return value
+    raise KeyError(name)
+
+
+def write_list(tmp_path, *rows):
+    path = tmp_path / "list.csv"
+    path.write_text("algorithm,hash,id\n" + "".join(r + "\n" for r in rows))
+    return str(path)
+
+
+def run(*args):
+    return CliRunner().invoke(cli, ["hash", *args])
+
+
+def test_prints_hashes():
+    result = run(ORIGINAL, ROTATED, "--algorithm", "pdq", "--algorithm", "phash")
+    assert result.exit_code == 0, result.output
+    lines = [l for l in result.output.splitlines() if l.strip()]
+    assert len(lines) == 4
+    pdq_line = next(l for l in lines if "bridge-1-original.jpg" in l and "pdq" in l)
+    assert expected_pdq("bridge-1-original.jpg") in pdq_line
+    assert "quality=100" in pdq_line
+    phash_line = next(l for l in lines if "bridge-1-original.jpg" in l and "phash" in l)
+    assert "quality" not in phash_line
+
+
+def test_against_list(tmp_path):
+    hit = write_list(tmp_path, "pdq," + expected_pdq("bridge-1-original.jpg") + ",known-1")
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", hit)
+    assert result.exit_code == 0, result.output
+    assert "known-1" in result.output
+    assert "distance=0" in result.output
+
+    miss = write_list(tmp_path, "pdq," + "0" * 64 + ",other")
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", miss)
+    assert result.exit_code == 0, result.output
+    assert "no match" in result.output
+    assert "other" not in result.output
+
+
+def test_thorough_matches_rotation(tmp_path):
+    only = write_list(tmp_path, "pdq," + expected_pdq("bridge-2-rotate-90.jpg") + ",rotated")
+    plain = run(ORIGINAL, "--algorithm", "pdq", "--against", only)
+    assert plain.exit_code == 0, plain.output
+    assert "no match" in plain.output
+    thorough = run(ORIGINAL, "--algorithm", "pdq", "--against", only, "--thorough")
+    assert thorough.exit_code == 0, thorough.output
+    assert "rotated" in thorough.output
+    assert "rot90" in thorough.output
+
+
+def test_json_output(tmp_path):
+    lst = write_list(tmp_path, "pdq," + expected_pdq("bridge-1-original.jpg") + ",known-1")
+    out = tmp_path / "out.json"
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", lst, "--json", str(out))
+    assert result.exit_code == 0, result.output
+    data = json.loads(out.read_text())
+    (image,) = data["images"]
+    assert image["path"] == ORIGINAL
+    assert image["hashes"][0]["algorithm"] == "pdq"
+    assert image["hashes"][0]["hex"] == expected_pdq("bridge-1-original.jpg")
+    assert image["hashes"][0]["quality"] == 100
+    assert image["matches"][0]["id"] == "known-1"
+    assert image["matches"][0]["distance"] == 0
+    assert image["skipped_low_quality"] == []
+
+
+def test_errors(tmp_path):
+    bad_image = tmp_path / "bad.jpg"
+    bad_image.write_text("not an image")
+    result = run(str(bad_image), "--algorithm", "pdq")
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output and "bad.jpg" in result.output
+
+    bad_list = tmp_path / "bad.csv"
+    bad_list.write_text("pdq,xyz,id1\n")
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", str(bad_list))
+    assert result.exit_code != 0
+    assert "line 1" in result.output
+    assert not isinstance(result.exception, ValueError)
+
+    if "phash-lib" not in available_algorithms():
+        result = run(ORIGINAL, "--algorithm", "phash-lib")
+        assert result.exit_code != 0
+        assert "libpHash" in result.output
+        assert isinstance(result.exception, SystemExit)
+
+    result = run(ORIGINAL, "--algorithm", "bogus")
+    assert result.exit_code != 0
+    assert "bogus" in result.output
+
+
+def test_photodna_not_installed():
+    result = run(ORIGINAL, "--algorithm", "photodna")
+    assert result.exit_code != 0
+    assert "PhotoDNA support isn't installed in this build" in result.output
+
+
+def test_all_excludes_photodna():
+    result = run(ORIGINAL, "--algorithm", "all")
+    assert result.exit_code == 0, result.output
+    assert "photodna" not in result.output.lower()
+    algos = {line.split()[1] for line in result.output.splitlines() if line.strip()}
+    assert algos == set(available_algorithms())
+    default = run(ORIGINAL)
+    assert default.exit_code == 0 and "photodna" not in default.output.lower()

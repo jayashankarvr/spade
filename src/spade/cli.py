@@ -351,6 +351,97 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
             f.write(to_dot(links))
 
 
+@cli.command("hash")
+@click.argument("images", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("-a", "--algorithm", "algorithms", multiple=True,
+              help="Hash algorithm: pdq, phash, phash-lib, or all (every one available here). "
+                   "Repeat for several. Default: all")
+@click.option("--against", "hash_list", type=click.Path(exists=True, dir_okay=False),
+              help="CSV list of known hashes (algorithm,hash,id) to match against")
+@click.option("--max-distance", type=click.IntRange(min=0), default=None,
+              help="Largest Hamming distance that counts as a match; default depends on the algorithm")
+@click.option("--min-quality", type=click.IntRange(0, 100), default=50, show_default=True,
+              help="Skip matching PDQ hashes of images with a lower quality score")
+@click.option("--thorough", is_flag=True,
+              help="Also hash the eight rotations and flips of each image, to match rotated or flipped copies")
+@click.option("--json", "json_output", type=click.Path(), help="Write the hashes and matches as JSON")
+def hash_command(images, algorithms, hash_list, max_distance, min_quality, thorough, json_output):
+    """Print perceptual hashes of IMAGES and optionally match them against a list."""
+    import json
+
+    from spade.exceptions import DependencyError
+    from spade.hashing import available_algorithms, hash_image, load_hash_list, match_hashes
+
+    local = available_algorithms()
+    names = []
+    for name in algorithms or ("all",):
+        name = name.lower()
+        if name == "photodna":
+            raise click.ClickException("PhotoDNA support isn't installed in this build")
+        for n in (local if name == "all" else [name]):
+            if n not in names:
+                names.append(n)
+    # An unavailable phash-lib is reported by hash_image with install advice.
+    known = set(local) | {"phash-lib"}
+    for n in names:
+        if n not in known:
+            raise click.ClickException(f"Unknown algorithm '{n}'; choose from: {', '.join(sorted(known))}, all")
+
+    try:
+        known_hashes = load_hash_list(hash_list) if hash_list else None
+    except (ValueError, OSError) as e:
+        raise click.ClickException(f"Can't read hash list: {e}")
+
+    report = []
+    for path in images:
+        image = safe_load_image(path)
+        try:
+            hashes = hash_image(image, names, dihedral=thorough)
+        except (DependencyError, ValueError) as e:
+            raise click.ClickException(str(e))
+        result = (
+            match_hashes(hashes, known_hashes, max_distance=max_distance, min_quality=min_quality)
+            if known_hashes is not None else None
+        )
+        report.append((path, hashes, result))
+
+        for h in hashes:
+            line = f"{path} {h.algorithm} {h.hex}"
+            if h.quality is not None:
+                line += f" quality={h.quality}"
+            if thorough:
+                line += f" variant={h.variant}"
+            click.echo(line)
+        if result is not None:
+            for m in result.matches:
+                click.echo(f"  match {m.id} ({m.algorithm}) distance={m.distance} variant={m.variant}")
+            if not result.matches:
+                click.echo("  no match")
+            seen = {(h.algorithm, h.quality) for h in result.skipped_low_quality}
+            for algo, quality in sorted(seen):
+                click.echo(f"  skipped {algo} hash: quality {quality} is below {min_quality}")
+
+    if json_output:
+        def hash_dict(h):
+            return {"algorithm": h.algorithm, "hex": h.hex, "quality": h.quality, "variant": h.variant}
+
+        doc = {"images": [
+            {
+                "path": path,
+                "hashes": [hash_dict(h) for h in hashes],
+                "matches": [
+                    {"id": m.id, "algorithm": m.algorithm, "hex": m.hex,
+                     "distance": m.distance, "variant": m.variant}
+                    for m in (result.matches if result else [])
+                ],
+                "skipped_low_quality": [hash_dict(h) for h in (result.skipped_low_quality if result else [])],
+            }
+            for path, hashes, result in report
+        ]}
+        with open(json_output, "w") as f:
+            json.dump(doc, f, indent=2)
+
+
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8000, help="Port to listen on")
