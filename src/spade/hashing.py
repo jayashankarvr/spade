@@ -302,6 +302,15 @@ class HashList:
         return self._matrices[algorithm]
 
 
+class MissingAlgorithmError(ValueError):
+    """A hash list row has no algorithm column and no algorithm was given."""
+
+    def __init__(self, message: str, path: str, line: int):
+        super().__init__(message)
+        self.path = path
+        self.line = line
+
+
 def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
     """Read a CSV hash list.
 
@@ -333,8 +342,9 @@ def load_hash_list(path: str, algorithm: Optional[str] = None) -> HashList:
                 name, value = algorithm, row[0]
                 ident = row[1] if len(row) == 2 else str(line)
                 if name is None:
-                    raise ValueError(
-                        f"{path}, line {line}: no algorithm column and none given; pass algorithm="
+                    raise MissingAlgorithmError(
+                        f"{path}, line {line}: no algorithm column and none given; pass algorithm=",
+                        path, line,
                     )
                 name = name.lower()
             if name != "photodna":

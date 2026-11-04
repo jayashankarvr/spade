@@ -115,6 +115,31 @@ def test_errors(tmp_path):
     assert "bogus" in result.output
 
 
+def test_list_without_algorithm_column(tmp_path):
+    pdq = expected_pdq("bridge-1-original.jpg")
+    two_columns = tmp_path / "two.csv"
+    two_columns.write_text(f"{pdq},bridge\n")
+    bare = tmp_path / "bare.txt"
+    bare.write_text(f"{pdq}\n")
+
+    result = run(ORIGINAL, "--algorithm", "pdq", "--against", str(two_columns))
+    assert result.exit_code == 0, result.output
+    assert "match bridge (pdq) distance=0" in result.output
+
+    result = run(ORIGINAL, "-a", "PDQ", "--against", str(bare))
+    assert result.exit_code == 0, result.output
+    assert "match 1 (pdq) distance=0" in result.output
+
+    # With no single --algorithm the list's algorithm is unknown.
+    for args in ([], ["-a", "pdq", "-a", "phash"], ["-a", "all"]):
+        result = run(ORIGINAL, *args, "--against", str(two_columns))
+        assert result.exit_code != 0
+        assert "add an algorithm column" in result.output
+        assert "--algorithm" in result.output
+        assert "algorithm=" not in result.output
+        assert "line 1" in result.output
+
+
 def test_all_excludes_photodna():
     result = run(ORIGINAL, "--algorithm", "all")
     assert result.exit_code == 0, result.output

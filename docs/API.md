@@ -439,7 +439,8 @@ curl -X POST "http://localhost:8000/hash?algorithm=pdq&algorithm=phash" \
 ```
 
 **Response Fields:**
-- `hashes`: One entry per algorithm, or eight (one per rotation and flip) in thorough mode
+- `hashes`: One entry per algorithm, or eight per algorithm (one per rotation
+  and flip) in thorough mode
   - `hash`: Lowercase hex (64 digits for `pdq`, 16 for `phash` and `phash-lib`)
   - `quality`: PDQ's 0-100 quality score; `null` for pHash. PDQ hashes below
     50 are not matched

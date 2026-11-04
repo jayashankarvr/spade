@@ -358,7 +358,8 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
                    "Repeat for several. Default: all. photodna (licensees only, needs "
                    "SPADE_PHOTODNA_KEY) is used only when named")
 @click.option("--against", "hash_list", type=click.Path(exists=True, dir_okay=False),
-              help="CSV list of known hashes (algorithm,hash,id) to match against")
+              help="CSV list of known hashes to match against: algorithm,hash,id rows, "
+                   "or hash,id / bare hashes when a single --algorithm is given")
 @click.option("--max-distance", type=click.IntRange(min=0), default=None,
               help="Largest Hamming distance that counts as a match; default depends on the algorithm")
 @click.option("--min-quality", type=click.IntRange(0, 100), default=50, show_default=True,
@@ -371,7 +372,9 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
     import json
 
     from spade.exceptions import DependencyError
-    from spade.hashing import available_algorithms, hash_image, load_hash_list, match_hashes
+    from spade.hashing import (
+        MissingAlgorithmError, available_algorithms, hash_image, load_hash_list, match_hashes,
+    )
 
     local = available_algorithms()
     names = []
@@ -391,8 +394,16 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         if n not in known:
             raise click.ClickException(f"Unknown algorithm '{n}'; choose from: {', '.join(sorted(known))}, all")
 
+    # A list without an algorithm column holds hashes of the one algorithm named.
+    named = {a.lower() for a in algorithms}
+    list_algorithm = names[0] if len(names) == 1 and named == {names[0]} else None
     try:
-        known_hashes = load_hash_list(hash_list) if hash_list else None
+        known_hashes = load_hash_list(hash_list, algorithm=list_algorithm) if hash_list else None
+    except MissingAlgorithmError as e:
+        raise click.ClickException(
+            f"Can't read hash list: {e.path}, line {e.line} has no algorithm column; "
+            "add an algorithm column (algorithm,hash,id) or pass a single --algorithm"
+        )
     except (ValueError, OSError) as e:
         raise click.ClickException(f"Can't read hash list: {e}")
 

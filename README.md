@@ -492,10 +492,14 @@ photo.jpg phash aca29c1c33dc23d7
   match bridge (pdq) distance=0 variant=original
 ```
 
+A list can also leave out the algorithm column (`hash,id`, or one bare hash
+per line) if you name its algorithm with a single `--algorithm`, e.g.
+`spade hash photo.jpg -a pdq --against pdq-list.txt`.
+
 In Python, `spade.hashing.hash_image`, `load_hash_list` and `match_hashes` do
-the same; `load_hash_list(path, algorithm="pdq")` also reads lists without an
-algorithm column (`hash,id`, or one bare hash per line). On the server, `POST /hash` does the same
-(see [docs/API.md](docs/API.md#post-hash)), with the list given to
+the same (`load_hash_list(path, algorithm="pdq")` for lists without an
+algorithm column). On the server, `POST /hash` does the same (see
+[docs/API.md](docs/API.md#post-hash)), with the list given to
 `spade serve --hash-list known.csv` (or `SPADE_HASH_LIST`) so it stays on the
 server. The JSON forensic report records each input image's hashes, for the
 local algorithms installed, next to its SHA-256.
@@ -524,7 +528,7 @@ photos:
 
 For `phash`, 10 sits well inside the gap: edited copies move 2 bits at most
 and different photos are at least 20 apart. For `pdq`, 31 is the threshold
-Meta publishes, set on far more images than these, and we keep it. The one
+Meta publishes for PDQ, and we keep it. The one
 miss is the brick photo halved in size (58 bits): it is an even, fine texture
 with little large-scale structure, and PDQ's hash of such an image changes a
 lot when it is shrunk, whatever resampling filter is used. Ordinary photos
@@ -536,12 +540,13 @@ libpHash isn't installed where these were run.
 ### What hashes don't survive
 
 Perceptual hashes describe the whole picture, so they fail when the picture as
-a whole changes: cropping (a 5% crop put every one of the 13 photos above
-past the PDQ threshold, and 2 of them past the pHash one), rotation by angles other than 90 degrees,
-and large local edits such as pasting in or removing a big object. Rotations
-by 90 degrees and mirror images match only with `--thorough`. For those cases,
-and for finding where part of an image came from, use `spade match` and
-`spade search`, which compare regions rather than whole images.
+a whole changes: cropping, rotation by angles other than 90 degrees, and
+large local edits such as pasting in or removing a big object. Even a 5% crop
+put all 13 photos above past the PDQ threshold, and 2 of them past the pHash
+one. Rotations by 90 degrees and mirror images match only with
+`--thorough`. For those cases, and for finding where part of an image came
+from, use `spade match` and `spade search`, which compare regions rather than
+whole images.
 
 ### Licensing and privacy
 
