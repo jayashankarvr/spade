@@ -115,12 +115,6 @@ def test_errors(tmp_path):
     assert "bogus" in result.output
 
 
-def test_photodna_not_installed():
-    result = run(ORIGINAL, "--algorithm", "photodna")
-    assert result.exit_code != 0
-    assert "PhotoDNA support isn't installed in this build" in result.output
-
-
 def test_all_excludes_photodna():
     result = run(ORIGINAL, "--algorithm", "all")
     assert result.exit_code == 0, result.output

@@ -355,7 +355,8 @@ def provenance(directory: str, pattern: str, fdr: float, copy_moves: bool, json_
 @click.argument("images", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
 @click.option("-a", "--algorithm", "algorithms", multiple=True,
               help="Hash algorithm: pdq, phash, phash-lib, or all (every one available here). "
-                   "Repeat for several. Default: all")
+                   "Repeat for several. Default: all. photodna (licensees only, needs "
+                   "SPADE_PHOTODNA_KEY) is used only when named")
 @click.option("--against", "hash_list", type=click.Path(exists=True, dir_okay=False),
               help="CSV list of known hashes (algorithm,hash,id) to match against")
 @click.option("--max-distance", type=click.IntRange(min=0), default=None,
@@ -374,10 +375,13 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
 
     local = available_algorithms()
     names = []
+    use_photodna = False
     for name in algorithms or ("all",):
         name = name.lower()
         if name == "photodna":
-            raise click.ClickException("PhotoDNA support isn't installed in this build")
+            # Only ever on when asked for by name; "all" skips it.
+            use_photodna = True
+            continue
         for n in (local if name == "all" else [name]):
             if n not in names:
                 names.append(n)
@@ -392,18 +396,37 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
     except (ValueError, OSError) as e:
         raise click.ClickException(f"Can't read hash list: {e}")
 
+    photodna_client = None
+    if use_photodna:
+        from spade import photodna
+        try:
+            photodna_client = photodna.PhotoDnaClient()
+        except photodna.PhotoDnaError as e:
+            raise click.ClickException(str(e))
+
     report = []
     for path in images:
-        image = safe_load_image(path)
-        try:
-            hashes = hash_image(image, names, dihedral=thorough)
-        except (DependencyError, ValueError) as e:
-            raise click.ClickException(str(e))
+        hashes = []
+        if names:
+            image = safe_load_image(path)
+            try:
+                hashes = hash_image(image, names, dihedral=thorough)
+            except (DependencyError, ValueError) as e:
+                raise click.ClickException(str(e))
+        verdict = None
+        if photodna_client is not None:
+            try:
+                with open(path, "rb") as f:
+                    verdict = photodna_client.match(f.read())
+            except OSError as e:
+                raise click.ClickException(f"Can't read {path}: {e}")
+            except photodna.PhotoDnaError as e:
+                raise click.ClickException(str(e))
         result = (
             match_hashes(hashes, known_hashes, max_distance=max_distance, min_quality=min_quality)
             if known_hashes is not None else None
         )
-        report.append((path, hashes, result))
+        report.append((path, hashes, result, verdict))
 
         for h in hashes:
             line = f"{path} {h.algorithm} {h.hex}"
@@ -412,6 +435,8 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
             if thorough:
                 line += f" variant={h.variant}"
             click.echo(line)
+        if verdict is not None:
+            click.echo(f"{path} photodna {json.dumps(verdict, sort_keys=True)}")
         if result is not None:
             for m in result.matches:
                 click.echo(f"  match {m.id} ({m.algorithm}) distance={m.distance} variant={m.variant}")
@@ -436,8 +461,11 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
                 ],
                 "skipped_low_quality": [hash_dict(h) for h in (result.skipped_low_quality if result else [])],
             }
-            for path, hashes, result in report
+            for path, hashes, result, verdict in report
         ]}
+        for entry, (_, _, _, verdict) in zip(doc["images"], report):
+            if verdict is not None:
+                entry["photodna"] = verdict
         with open(json_output, "w") as f:
             json.dump(doc, f, indent=2)
 
