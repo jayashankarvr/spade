@@ -8,6 +8,7 @@ it is used only if the user installed it themselves.
 
 import ctypes
 import ctypes.util
+import functools
 import os
 import tempfile
 from dataclasses import dataclass
@@ -150,19 +151,42 @@ _PHASH_LIB_HINT = (
 )
 
 
-def _load_phash_lib() -> Optional[ctypes.CDLL]:
-    """The user's own libpHash, or None. ``SPADE_PHASH_LIB`` wins over the system search."""
-    path = os.environ.get("SPADE_PHASH_LIB") or ctypes.util.find_library("pHash")
+# pHash.h declares ph_dct_imagehash(const char*, ulong64&) in C++, so unless the
+# header was built with extern "C" the symbol is mangled (64-bit Linux names).
+_PHASH_SYMBOLS = (
+    "ph_dct_imagehash",
+    "_Z16ph_dct_imagehashPKcRm",  # ulong64 is unsigned long
+    "_Z16ph_dct_imagehashPKcRy",  # ulong64 is unsigned long long
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _load_phash_lib():
+    """The user's own ``ph_dct_imagehash`` as a callable, or None if libpHash isn't there.
+
+    ``SPADE_PHASH_LIB`` wins, and with no fallback to the system search: a path
+    that was set but won't load is an error, not a missing library. Raises
+    DependencyError when a library was found but is unusable.
+    """
+    explicit = os.environ.get("SPADE_PHASH_LIB")
+    path = explicit or ctypes.util.find_library("pHash")
     if not path:
         return None
     try:
         lib = ctypes.CDLL(path)
-        fn = lib.ph_dct_imagehash
-    except (OSError, AttributeError):
+    except OSError as e:
+        if explicit:
+            raise DependencyError(f"SPADE_PHASH_LIB={path} couldn't be loaded: {e}") from e
         return None
-    fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64)]
-    fn.restype = ctypes.c_int
-    return lib
+    for symbol in _PHASH_SYMBOLS:
+        try:
+            fn = getattr(lib, symbol)
+        except AttributeError:
+            continue
+        fn.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64)]
+        fn.restype = ctypes.c_int
+        return fn
+    raise DependencyError(f"libpHash was found at {path} but doesn't export ph_dct_imagehash")
 
 
 class _PhashLib:
@@ -172,8 +196,8 @@ class _PhashLib:
     bits = 64
 
     def compute(self, image: np.ndarray, dihedral: bool) -> List[ImageHash]:
-        lib = _load_phash_lib()
-        if lib is None:
+        hash_file = _load_phash_lib()
+        if hash_file is None:
             raise DependencyError(_PHASH_LIB_HINT)
 
         rgb = _as_rgb(image)
@@ -187,7 +211,7 @@ class _PhashLib:
             try:
                 Image.fromarray(np.ascontiguousarray(img)).save(path, format="PNG")
                 value = ctypes.c_uint64()
-                if lib.ph_dct_imagehash(os.fsencode(path), ctypes.byref(value)) != 0:
+                if hash_file(os.fsencode(path), ctypes.byref(value)) != 0:
                     raise RuntimeError(f"libpHash couldn't hash the image (variant '{variant}')")
             finally:
                 os.remove(path)
@@ -201,7 +225,11 @@ _ALGORITHMS = {a.name: a for a in (_Pdq(), _Phash(), _PhashLib())}
 def available_algorithms() -> List[str]:
     """Algorithms hashed in this process (never ``photodna``)."""
     names = list(_ALGORITHMS)
-    if _load_phash_lib() is None:
+    try:
+        usable = _load_phash_lib() is not None
+    except DependencyError:
+        usable = False
+    if not usable:
         names.remove("phash-lib")
     return names
 
@@ -218,8 +246,6 @@ def hash_image(
     for name in algorithms:
         if name == "photodna":
             raise ValueError("photodna isn't hashed locally; use spade.photodna")
-        if name == "phash-lib" and _load_phash_lib() is None:
-            raise DependencyError(_PHASH_LIB_HINT)
         if name not in _ALGORITHMS:
             raise ValueError(f"unknown hash algorithm '{name}'; available: {available_algorithms()}")
         out.extend(_ALGORITHMS[name].compute(image, dihedral))

@@ -1,6 +1,7 @@
 """Tests for spade.hashing: PDQ against Meta's reference vectors, pHash against imagehash."""
 
 import csv
+import os
 import sys
 from pathlib import Path
 from unittest import mock
@@ -19,6 +20,7 @@ from spade.hashing import (
     dihedral_images,
     hamming,
     hash_image,
+    _load_phash_lib,
 )
 
 pytest.importorskip("pdqhash")
@@ -154,17 +156,88 @@ def test_phash_lib_missing_is_clear(original):
 def test_phash_lib_matches_library():
     import ctypes
 
-    from spade.hashing import _load_phash_lib
-
-    lib = _load_phash_lib()
-    if lib is None:
+    hash_file = _load_phash_lib()
+    if hash_file is None:
         pytest.skip("libpHash isn't installed")
     assert "phash-lib" in available_algorithms()
     for row in _expected():
         path = DATA / row["filename"]
         out = ctypes.c_uint64()
-        assert lib.ph_dct_imagehash(str(path).encode(), ctypes.byref(out)) == 0
+        assert hash_file(str(path).encode(), ctypes.byref(out)) == 0
         got = hash_image(load_image(str(path)), ["phash-lib"])[0]
         assert got.algorithm == "phash-lib"
         assert got.quality is None
         assert got.hex == f"{out.value:016x}"
+
+
+def _fake_hasher(value=0xABC, rc=0, seen=None):
+    def fn(path, out):
+        if seen is not None:
+            seen.append(os.fsdecode(path))
+            assert os.path.exists(path)
+        out._obj.value = value
+        return rc
+
+    return fn
+
+
+def test_phash_lib_formats_hex(original):
+    with mock.patch("spade.hashing._load_phash_lib", return_value=_fake_hasher(0xABC)):
+        (h,) = hash_image(original, ["phash-lib"])
+    assert (h.algorithm, h.hex, h.quality, h.variant) == ("phash-lib", "0000000000000abc", None, "original")
+
+
+def test_phash_lib_dihedral(original):
+    with mock.patch("spade.hashing._load_phash_lib", return_value=_fake_hasher()):
+        hashes = hash_image(original, ["phash-lib"], dihedral=True)
+    assert [h.variant for h in hashes] == list(VARIANTS)
+
+
+def test_phash_lib_failure_and_temp_cleanup(original):
+    seen = []
+    with mock.patch("spade.hashing._load_phash_lib", return_value=_fake_hasher(seen=seen)):
+        hash_image(original, ["phash-lib"])
+    with mock.patch("spade.hashing._load_phash_lib", return_value=_fake_hasher(rc=1, seen=seen)):
+        with pytest.raises(RuntimeError, match="libpHash"):
+            hash_image(original, ["phash-lib"])
+    assert len(seen) == 2
+    assert not any(os.path.exists(p) for p in seen)
+
+
+class _FakeCDLL:
+    def __init__(self, **symbols):
+        self.__dict__.update(symbols)
+
+
+@pytest.fixture
+def fresh_loader():
+    _load_phash_lib.cache_clear()
+    yield
+    _load_phash_lib.cache_clear()
+
+
+def test_phash_lib_mangled_symbol_fallback(fresh_loader, monkeypatch):
+    monkeypatch.delenv("SPADE_PHASH_LIB", raising=False)
+    fn = _fake_hasher()
+    lib = _FakeCDLL(_Z16ph_dct_imagehashPKcRm=fn)
+    with mock.patch("ctypes.util.find_library", return_value="libpHash.so.0"), mock.patch("ctypes.CDLL", return_value=lib):
+        assert _load_phash_lib() is fn
+        assert "phash-lib" in available_algorithms()
+
+
+def test_phash_lib_loaded_without_symbol(fresh_loader, original, monkeypatch):
+    monkeypatch.delenv("SPADE_PHASH_LIB", raising=False)
+    with mock.patch("ctypes.util.find_library", return_value="/usr/lib/libpHash.so.0"), mock.patch("ctypes.CDLL", return_value=_FakeCDLL()):
+        assert "phash-lib" not in available_algorithms()
+        with pytest.raises(DependencyError, match=r"/usr/lib/libpHash.so.0.*doesn't export ph_dct_imagehash"):
+            hash_image(original, ["phash-lib"])
+
+
+def test_phash_lib_bad_env_path(fresh_loader, original, monkeypatch, tmp_path):
+    bad = str(tmp_path / "nope.so")
+    monkeypatch.setenv("SPADE_PHASH_LIB", bad)
+    with mock.patch("ctypes.util.find_library", return_value="libpHash.so.0") as find:
+        assert "phash-lib" not in available_algorithms()
+        with pytest.raises(DependencyError, match="SPADE_PHASH_LIB=.*nope.so"):
+            hash_image(original, ["phash-lib"])
+        find.assert_not_called()
