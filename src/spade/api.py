@@ -2,6 +2,7 @@
 
 import io
 import base64
+import os
 import threading
 import uuid
 from typing import Optional, List, Dict, Any, Tuple
@@ -130,12 +131,17 @@ async def validate_uploaded_image(file: UploadFile) -> Tuple[np.ndarray, float]:
         raise HTTPException(status_code=400, detail=f"Invalid image file: {str(e)}")
 
 
-def create_app(config: Optional[Config] = None) -> "FastAPI":
+def create_app(config: Optional[Config] = None, hash_list_path: Optional[str] = None) -> "FastAPI":
     """
     Create FastAPI application with SPADE engine.
 
     Args:
         config: Optional engine configuration
+        hash_list_path: CSV of known hashes that /hash matches against; defaults
+            to the SPADE_HASH_LIST environment variable. Loaded once, here.
+
+    Raises:
+        ValueError: if the hash list can't be read
 
     Returns:
         FastAPI application instance
@@ -150,7 +156,18 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
     )
 
     # Initialize engine
-    engine = ForensicsEngine(config or Config())
+    config = config or Config()
+    engine = ForensicsEngine(config)
+
+    # Known hashes for /hash, read once so a bad file stops the server at startup.
+    hash_list = None
+    hash_list_path = hash_list_path or os.environ.get("SPADE_HASH_LIST") or None
+    if hash_list_path:
+        from spade.hashing import load_hash_list
+        try:
+            hash_list = load_hash_list(hash_list_path)
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Can't read hash list {hash_list_path}: {e}") from e
 
     # Index, delete and match all touch the engine's target table, so they take
     # turns. The work itself runs in a worker thread to keep the event loop free.
@@ -423,6 +440,77 @@ def create_app(config: Optional[Config] = None) -> "FastAPI":
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Match failed: {str(e)}")
 
+    @app.post("/hash")
+    async def hash_endpoint(
+        file: UploadFile = File(...),
+        algorithm: Optional[List[str]] = Query(
+            None, description="Algorithm to use; repeat for several. Default: every local one"),
+    ):
+        """
+        Perceptual hashes of an uploaded image.
+
+        With a server hash list (--hash-list), the response also has the list
+        entries the image matches. photodna sends the image to Microsoft's
+        PhotoDNA Cloud Service and only works when the operator has set
+        SPADE_PHOTODNA_KEY on the server.
+        """
+        from spade.hashing import available_algorithms, hash_image, match_hashes
+
+        names = []
+        for name in algorithm or []:
+            name = name.lower()
+            if name not in names:
+                names.append(name)
+        use_photodna = "photodna" in names
+        names = [n for n in names if n != "photodna"]
+        if not algorithm:
+            names = available_algorithms()
+
+        client = None
+        if use_photodna:
+            from spade import photodna
+            if not os.environ.get("SPADE_PHOTODNA_KEY"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="photodna is disabled: the server operator has to set "
+                           "SPADE_PHOTODNA_KEY (a Microsoft PhotoDNA Cloud Service key) on the server",
+                )
+            try:
+                client = photodna.PhotoDnaClient()
+            except photodna.PhotoDnaError as e:
+                raise HTTPException(status_code=501, detail=str(e))
+
+        image_array, _ = await validate_uploaded_image(file)
+
+        try:
+            hashes = await run_in_threadpool(
+                hash_image, image_array, names, dihedral=config.thorough)
+        except (DependencyError, ValueError) as e:
+            raise HTTPException(status_code=501, detail=str(e))
+
+        body: Dict[str, Any] = {"hashes": [
+            {"algorithm": h.algorithm, "hash": h.hex, "quality": h.quality, "variant": h.variant}
+            for h in hashes
+        ]}
+
+        if hash_list is not None:
+            report = await run_in_threadpool(match_hashes, hashes, hash_list)
+            body["matches"] = [
+                {"id": m.id, "algorithm": m.algorithm, "hash": m.hex,
+                 "distance": m.distance, "variant": m.variant}
+                for m in report.matches
+            ]
+
+        if client is not None:
+            await file.seek(0)
+            raw = await file.read()
+            try:
+                body["photodna"] = await run_in_threadpool(client.match, raw)
+            except photodna.PhotoDnaError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+
+        return body
+
     @app.get("/targets")
     async def list_targets():
         """List all indexed target images."""
@@ -452,6 +540,7 @@ def run_server(
     host: str = "0.0.0.0",
     port: int = 8000,
     config: Optional[Config] = None,
+    hash_list_path: Optional[str] = None,
 ):
     """
     Run the API server.
@@ -460,13 +549,14 @@ def run_server(
         host: Host to bind to
         port: Port to listen on
         config: Engine configuration
+        hash_list_path: CSV of known hashes for /hash
     """
     try:
         import uvicorn
     except ImportError:
         raise DependencyError("uvicorn required: pip install spade-forensics[api]")
 
-    app = create_app(config)
+    app = create_app(config, hash_list_path=hash_list_path)
     uvicorn.run(app, host=host, port=port)
 
 

@@ -1,6 +1,9 @@
 """Tests for the JSON forensic report contract."""
 
 import json
+from unittest import mock
+
+import pytest
 
 import numpy as np
 
@@ -57,6 +60,29 @@ class TestBuildReport:
         assert report["schema_version"] == SCHEMA_VERSION
         for key in ("tool", "generated_at", "inputs", "config", "result", "artifacts"):
             assert key in report
+
+    def test_report_records_hashes(self):
+        pytest.importorskip("pdqhash")
+        from pathlib import Path
+        from spade.engine import load_image
+        from spade.hashing import hash_image
+
+        path = str(Path(__file__).parent / "data" / "hashes" / "bridge-1-original.jpg")
+        image = load_image(path)
+        report = build_report(result=_result([]), config=Config(), source_path=path, source_image=image)
+        assert report["schema_version"] == "2.2"
+        hashes = report["inputs"]["source"]["hashes"]
+        pdq = hash_image(image, ["pdq"])[0]
+        assert hashes["pdq"] == {"hash": pdq.hex, "quality": pdq.quality}
+        assert "photodna" not in hashes
+        assert "quality" not in hashes.get("phash", {})
+        # no image, no hashes
+        assert "hashes" not in report["inputs"]["target"]
+
+    def test_report_skips_hashes_without_packages(self):
+        with mock.patch("spade.hashing.available_algorithms", return_value=[]):
+            report = build_report(result=_result([]), config=Config(), source_image=np.zeros((20, 20, 3)))
+        assert "hashes" not in report["inputs"]["source"]
 
     def test_best_match_includes_color_transform(self):
         report = build_report(result=_result([_match()]), config=Config())

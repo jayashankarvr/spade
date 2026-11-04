@@ -35,7 +35,9 @@ import numpy as np
 # 2.1: regions gain "mirrored", "source_scale" and "rotation_degrees"; "offset" is
 #      null for mirrored or rescaled regions, where no single translation maps
 #      source to target (use the two bboxes). Config records the search settings.
-SCHEMA_VERSION = "2.1"
+# 2.2: image entries under "inputs" gain "hashes" (PDQ, pHash, and libpHash when
+#      installed), left out when the optional hashing packages aren't there.
+SCHEMA_VERSION = "2.2"
 
 # Config fields worth recording for reproducibility (kept deliberately small and
 # forensically relevant rather than dumping the whole Config).
@@ -84,6 +86,28 @@ def sha256_file(path: str) -> Optional[str]:
         return None
 
 
+def _image_hashes(image: Optional[np.ndarray]) -> Dict[str, Dict[str, Any]]:
+    """Perceptual hashes of an image, for the algorithms installed here.
+
+    Never includes photodna (that needs a licence and sends the image away).
+    Returns {} when there is no image or no hashing package is installed.
+    """
+    if image is None:
+        return {}
+    from spade.hashing import available_algorithms, hash_image
+
+    names = available_algorithms()
+    if not names:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for h in hash_image(image, names):
+        entry: Dict[str, Any] = {"hash": h.hex}
+        if h.quality is not None:
+            entry["quality"] = h.quality
+        out[h.algorithm] = entry
+    return out
+
+
 def _image_meta(path: Optional[str], image: Optional[np.ndarray]) -> Dict[str, Any]:
     meta: Dict[str, Any] = {"path": path, "sha256": sha256_file(path) if path else None}
     if image is not None:
@@ -92,6 +116,9 @@ def _image_meta(path: Optional[str], image: Optional[np.ndarray]) -> Dict[str, A
     else:
         meta["height"] = None
         meta["width"] = None
+    hashes = _image_hashes(image)
+    if hashes:
+        meta["hashes"] = hashes
     return meta
 
 

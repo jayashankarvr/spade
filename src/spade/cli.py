@@ -477,16 +477,23 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
 @click.option("--patch-size", type=int, default=None, help="Patch size (3-16); default from config")
 @click.option("--pyramid/--no-pyramid", default=None, help="Index targets at several scales (default: on)")
 @click.option("--thorough", is_flag=True, help=THOROUGH_HELP)
+@click.option("--hash-list", "hash_list", envvar="SPADE_HASH_LIST",
+              type=click.Path(exists=True, dir_okay=False),
+              help="CSV of known hashes (algorithm,hash,id) that /hash matches uploads against")
 def serve(
     host: str,
     port: int,
     patch_size: Optional[int],
     pyramid: Optional[bool],
     thorough: bool,
+    hash_list: Optional[str],
 ):
     """Start the REST API server."""
     try:
         from spade.api import run_server
+    except ValueError as e:
+        # importing spade.api builds the default app, which reads SPADE_HASH_LIST
+        raise click.ClickException(str(e))
     except ImportError:
         raise click.ClickException(
             "FastAPI required for API server: pip install spade-forensics[api]"
@@ -504,7 +511,13 @@ def serve(
     click.echo(f"  Pyramid: {'enabled' if config.pyramid_enabled else 'disabled'}")
     click.echo(f"\nAPI documentation: http://localhost:{port}/docs\n")
 
-    run_server(host=host, port=port, config=config)
+    if hash_list:
+        click.echo(f"  Hash list: {hash_list}")
+
+    try:
+        run_server(host=host, port=port, config=config, hash_list_path=hash_list)
+    except ValueError as e:
+        raise click.ClickException(str(e))
 
 
 def colorize_heatmap(heatmap: np.ndarray) -> np.ndarray:
