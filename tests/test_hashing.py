@@ -250,3 +250,34 @@ def test_available_algorithms_needs_the_packages(monkeypatch):
     assert "phash" not in available_algorithms()
     with pytest.raises(DependencyError):
         hash_image(np.zeros((16, 16, 3), dtype=np.uint8), ["pdq"])
+
+
+def _cimg_nearest_indices(old: int, new: int) -> list:
+    """Source index for each output pixel, transcribed from CImg 2.2's resize
+    (interpolation_type=1, the default Meta's pdqio.cpp uses): each step is
+    ``floor((i + 1.0) * old / new) - floor(i * old / new)``, starting at 0."""
+    out, pos, curr = [], 0, 0
+    for i in range(new):
+        out.append(pos)
+        old_curr, curr = curr, int((i + 1.0) * old / new)
+        pos += curr - old_curr
+    return out
+
+
+def test_pdq_downsample_picks_cimg_pixels():
+    from spade.hashing import _downsample
+
+    h, w = 700, 2000
+    rows, cols = np.mgrid[0:h, 0:w]
+    coords = np.dstack([rows, cols])  # each pixel holds its own (row, col)
+    small = _downsample(coords)
+    assert small.shape[:2] == (512, 512)
+    assert list(small[:, 0, 0]) == _cimg_nearest_indices(h, 512)
+    assert list(small[0, :, 1]) == _cimg_nearest_indices(w, 512)
+    # A few by hand: floor(i * size / 512).
+    assert [small[i, 0, 0] for i in (0, 1, 2, 511)] == [0, 1, 2, 698]
+    assert [small[0, j, 1] for j in (0, 1, 2, 511)] == [0, 3, 7, 1996]
+    # 512 or smaller on both sides is left alone.
+    edge = np.zeros((512, 300, 3), np.uint8)
+    assert _downsample(edge) is edge
+
