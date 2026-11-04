@@ -1,5 +1,6 @@
 """Command-line interface for SPADE."""
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -412,13 +413,14 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
     except (ValueError, OSError) as e:
         raise click.ClickException(f"Can't read hash list: {e}")
 
-    # Open the output first so a bad path fails before any image is sent anywhere.
-    out_file = None
+    # Check the output path first so a bad one fails before any image is sent
+    # anywhere, without creating or truncating the file until there is a result.
     if json_output:
-        try:
-            out_file = open(json_output, "w")
-        except OSError as e:
-            raise click.ClickException(f"Can't write {json_output}: {e}")
+        target = os.path.abspath(json_output)
+        writable = (os.access(target, os.W_OK) if os.path.exists(target)
+                    else os.access(os.path.dirname(target), os.W_OK))
+        if os.path.isdir(target) or not writable:
+            raise click.ClickException(f"Can't write {json_output}")
 
     photodna_client = None
     if use_photodna:
@@ -499,8 +501,11 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         for entry, (_, _, _, verdict) in zip(doc["images"], report):
             if verdict is not None:
                 entry["photodna"] = verdict
-        with out_file:
-            json.dump(doc, out_file, indent=2)
+        try:
+            with open(json_output, "w") as f:
+                json.dump(doc, f, indent=2)
+        except OSError as e:
+            raise click.ClickException(f"Can't write {json_output}: {e}")
 
 
 @cli.command()

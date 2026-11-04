@@ -205,3 +205,13 @@ def test_json_path_checked_before_hashing(tmp_path):
     assert result.exit_code != 0
     assert "Can't write" in result.output
     assert ORIGINAL not in result.output
+
+
+def test_failed_run_leaves_json_output_alone(tmp_path):
+    out = tmp_path / "out.json"
+    out.write_text("earlier result")
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"not an image")
+    result = run(str(broken), "--algorithm", "pdq", "--json", str(out))
+    assert result.exit_code != 0
+    assert out.read_text() == "earlier result"

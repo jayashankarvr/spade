@@ -88,11 +88,17 @@ def _as_rgb(image: np.ndarray) -> np.ndarray:
     elif image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected a (H, W) or (H, W, 3) image, got shape {image.shape}")
     if image.dtype != np.uint8:
-        # Values are pixel values on the 0..255 scale; anything else would be
-        # clipped into a different image and hashed without complaint.
-        if not (image.min() >= 0 and image.max() <= 255):
-            raise ValueError("pixel values must be within 0..255")
-        image = image.astype(np.uint8)
+        # Read it the way the engine's _normalize_image does: float32 up to 1.0
+        # is on the 0..1 scale, anything else is scaled by its own maximum.
+        # Clipping instead would hash a different picture without saying so.
+        values = image.astype(np.float64)
+        if values.size and (not np.isfinite(values).all() or values.min() < 0):
+            raise ValueError("pixel values must be finite and not negative")
+        top = values.max() if values.size else 0.0
+        if image.dtype == np.float32 and top <= 1.0:
+            top = 1.0
+        scale = 255.0 / top if top > 0 else 0.0
+        image = np.rint(values * scale).astype(np.uint8)
     return np.ascontiguousarray(image)
 
 

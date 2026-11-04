@@ -324,14 +324,19 @@ def test_dihedral_images_accepts_2d():
     assert all(v.ndim == 3 and v.shape[2] == 3 for v in variants)
 
 
-def test_out_of_range_pixels_refused():
+def test_non_uint8_images_read_like_the_engine():
     from spade.hashing import _as_rgb
 
-    for bad in (np.full((4, 4, 3), 300.0), np.full((4, 4, 3), -1.0), np.full((4, 4, 3), np.nan)):
-        with pytest.raises(ValueError, match="0..255"):
+    for bad in (np.full((4, 4, 3), -1.0), np.full((4, 4, 3), np.nan)):
+        with pytest.raises(ValueError, match="finite and not negative"):
             _as_rgb(bad)
-    ok = _as_rgb(np.full((4, 4, 3), 255.0))
-    assert ok.dtype == np.uint8 and ok.max() == 255
+    ramp = np.linspace(0, 1, 48, dtype=np.float32).reshape(4, 4, 3)
+    expected = np.rint(ramp.astype(np.float64) * 255).astype(np.uint8)
+    np.testing.assert_array_equal(_as_rgb(ramp), expected)
+    # 16-bit and other scales are stretched by their maximum, as in the engine.
+    np.testing.assert_array_equal(_as_rgb((ramp * 65535).astype(np.uint16)).max(), 255)
+    np.testing.assert_array_equal(_as_rgb(np.ones((4, 4, 3), dtype=bool)), 255)
+    assert _as_rgb(np.zeros((4, 4, 3), dtype=np.float32)).max() == 0
 
 
 def test_popcount_table_matches_bitwise_count():
