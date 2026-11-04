@@ -1,6 +1,8 @@
 """Tests for the REST API."""
 
 import csv
+import os
+import subprocess
 import io
 import sys
 from pathlib import Path
@@ -133,7 +135,29 @@ def test_hash_endpoint_missing_package():
 def test_hash_endpoint_unknown_algorithm():
     client = TestClient(create_app())
     r = client.post("/hash", params={"algorithm": "nope"}, files={"file": _bridge()})
-    assert r.status_code == 501
+    assert r.status_code == 400
+
+
+def test_hash_endpoint_libphash_failure():
+    client = TestClient(create_app())
+    from spade import hashing
+    with mock.patch.object(hashing._ALGORITHMS["pdq"], "compute", side_effect=RuntimeError("boom")):
+        r = client.post("/hash", params={"algorithm": "pdq"}, files={"file": _bridge()})
+    assert r.status_code == 502
+    assert "pdq" in r.json()["detail"]
+
+
+def test_import_ignores_bad_hash_list(tmp_path):
+    bad = tmp_path / "bad.csv"
+    bad.write_text("pdq,zz,x\n")
+    code = "import spade.api"
+    env = dict(os.environ, SPADE_HASH_LIST=str(bad))
+    done = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    # the lazily built default app is where the bad list surfaces
+    code = "import spade.api as a\ntry:\n    a.app\nexcept ValueError as e:\n    print('bad list')"
+    done = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert "bad list" in done.stdout
 
 
 def test_photodna_needs_server_key(monkeypatch):

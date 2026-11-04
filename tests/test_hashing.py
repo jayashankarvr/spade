@@ -241,3 +241,12 @@ def test_phash_lib_bad_env_path(fresh_loader, original, monkeypatch, tmp_path):
         with pytest.raises(DependencyError, match="SPADE_PHASH_LIB=.*nope.so"):
             hash_image(original, ["phash-lib"])
         find.assert_not_called()
+
+
+def test_available_algorithms_needs_the_packages(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pdqhash", None)
+    monkeypatch.setitem(sys.modules, "imagehash", None)
+    assert "pdq" not in available_algorithms()
+    assert "phash" not in available_algorithms()
+    with pytest.raises(DependencyError):
+        hash_image(np.zeros((16, 16, 3), dtype=np.uint8), ["pdq"])

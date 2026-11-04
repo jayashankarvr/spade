@@ -65,7 +65,12 @@ For more options, use the spade CLI tool (if click is installed):
         print("Press Ctrl+C to stop")
         try:
             from spade.api import run_server
-            run_server(host=args.host, port=args.port)
+            try:
+                run_server(host=args.host, port=args.port)
+            except ValueError as e:
+                # a bad SPADE_HASH_LIST
+                print(f"Error: {e}")
+                return 1
         except KeyboardInterrupt:
             print("\nServer stopped")
             return 0

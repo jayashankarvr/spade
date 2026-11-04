@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 # Bump on any breaking change to the structure below.
 # 1.1: added top-level "cues" (image-level forensic signals) + result.localization.
@@ -96,15 +99,19 @@ def _image_hashes(image: Optional[np.ndarray]) -> Dict[str, Dict[str, Any]]:
         return {}
     from spade.hashing import available_algorithms, hash_image
 
-    names = available_algorithms()
-    if not names:
-        return {}
     out: Dict[str, Dict[str, Any]] = {}
-    for h in hash_image(image, names):
-        entry: Dict[str, Any] = {"hash": h.hex}
-        if h.quality is not None:
-            entry["quality"] = h.quality
-        out[h.algorithm] = entry
+    for name in available_algorithms():
+        # A hash is a bonus; whatever goes wrong with one must not sink the report.
+        try:
+            hashes = hash_image(image, [name])
+        except Exception as e:
+            log.warning("Leaving the %s hash out of the report: %s", name, e)
+            continue
+        for h in hashes:
+            entry: Dict[str, Any] = {"hash": h.hex}
+            if h.quality is not None:
+                entry["quality"] = h.quality
+            out[h.algorithm] = entry
     return out
 
 

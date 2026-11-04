@@ -1,6 +1,7 @@
 """Tests for the JSON forensic report contract."""
 
 import json
+import sys
 from unittest import mock
 
 import pytest
@@ -79,10 +80,26 @@ class TestBuildReport:
         # no image, no hashes
         assert "hashes" not in report["inputs"]["target"]
 
-    def test_report_skips_hashes_without_packages(self):
-        with mock.patch("spade.hashing.available_algorithms", return_value=[]):
-            report = build_report(result=_result([]), config=Config(), source_image=np.zeros((20, 20, 3)))
-        assert "hashes" not in report["inputs"]["source"]
+    def test_report_survives_missing_hash_packages(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pdqhash", None)
+        monkeypatch.setitem(sys.modules, "imagehash", None)
+        report = build_report(result=_result([]), config=Config(), source_image=np.zeros((20, 20, 3)))
+        hashes = report["inputs"]["source"].get("hashes", {})
+        assert "pdq" not in hashes and "phash" not in hashes
+
+    def test_report_survives_one_failing_algorithm(self, monkeypatch, caplog):
+        pytest.importorskip("pdqhash")
+        pytest.importorskip("imagehash")
+        from spade import hashing
+
+        def boom(image, dihedral):
+            raise RuntimeError("libpHash exploded")
+
+        monkeypatch.setattr(hashing._ALGORITHMS["pdq"], "compute", boom)
+        report = build_report(result=_result([]), config=Config(), source_image=np.zeros((20, 20, 3)))
+        hashes = report["inputs"]["source"]["hashes"]
+        assert "pdq" not in hashes and "hash" in hashes["phash"]
+        assert "pdq" in caplog.text
 
     def test_best_match_includes_color_transform(self):
         report = build_report(result=_result([_match()]), config=Config())

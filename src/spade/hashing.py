@@ -10,6 +10,7 @@ import csv
 import ctypes
 import ctypes.util
 import functools
+import importlib
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -225,13 +226,19 @@ _ALGORITHMS = {a.name: a for a in (_Pdq(), _Phash(), _PhashLib())}
 
 def available_algorithms() -> List[str]:
     """Algorithms hashed in this process (never ``photodna``)."""
-    names = list(_ALGORITHMS)
+    names = []
+    for name, module in (("pdq", "pdqhash"), ("phash", "imagehash")):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            continue
+        names.append(name)
     try:
         usable = _load_phash_lib() is not None
     except DependencyError:
         usable = False
-    if not usable:
-        names.remove("phash-lib")
+    if usable:
+        names.append("phash-lib")
     return names
 
 

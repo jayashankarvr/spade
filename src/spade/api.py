@@ -463,6 +463,11 @@ def create_app(config: Optional[Config] = None, hash_list_path: Optional[str] = 
                 names.append(name)
         use_photodna = "photodna" in names
         names = [n for n in names if n != "photodna"]
+        unknown = [n for n in names if n not in ("pdq", "phash", "phash-lib")]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown algorithm '{unknown[0]}'; choose from: pdq, phash, phash-lib, photodna")
         if not algorithm:
             names = available_algorithms()
 
@@ -485,8 +490,10 @@ def create_app(config: Optional[Config] = None, hash_list_path: Optional[str] = 
         try:
             hashes = await run_in_threadpool(
                 hash_image, image_array, names, dihedral=config.thorough)
-        except (DependencyError, ValueError) as e:
+        except DependencyError as e:
             raise HTTPException(status_code=501, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=f"Hashing with {', '.join(names)} failed: {e}")
 
         body: Dict[str, Any] = {"hashes": [
             {"algorithm": h.algorithm, "hash": h.hex, "quality": h.quality, "variant": h.variant}
@@ -560,5 +567,12 @@ def run_server(
     uvicorn.run(app, host=host, port=port)
 
 
-# Create default app instance for uvicorn
-app = create_app() if FASTAPI_AVAILABLE else None
+def __getattr__(name):
+    # `uvicorn spade.api:app` asks for this attribute. Build the default app on
+    # first use rather than at import, so importing the module has no side
+    # effects (it would read SPADE_HASH_LIST and fail on a bad file).
+    if name == "app":
+        global app
+        app = create_app() if FASTAPI_AVAILABLE else None
+        return app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
