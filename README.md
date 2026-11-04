@@ -14,6 +14,7 @@ pip install spade-forensics
 # With optional features:
 pip install spade-forensics[api]    # REST API
 pip install spade-forensics[bench]  # Benchmark harness (OpenCV baseline)
+pip install spade-forensics[hash]   # Perceptual image hashes (PDQ, pHash)
 pip install spade-forensics[full]   # Everything
 ```
 
@@ -450,6 +451,113 @@ spec:
           claimName: spade-pvc
 ```
 
+## Image hashing
+
+`spade hash` computes perceptual hashes and checks them against lists of known
+hashes, such as the lists organisations share through Meta's ThreatExchange or
+older databases built with pHash. A hash answers "is this the same picture,
+give or take resizing, recompression and small edits?". It doesn't say where a
+piece of a picture came from; that is what SPADE's region search is for.
+
+A list only works with hashes made the same way, bit for bit, as the ones in
+it, so every algorithm here comes from its reference library:
+
+| Algorithm | What it is | Bits | Comes from | Match at distance |
+|---|---|---|---|---|
+| `pdq` | Meta's PDQ, the format of ThreatExchange lists | 256 | `pdqhash` (Meta's C++), `pip install spade-forensics[hash]` | 31 or less |
+| `phash` | DCT pHash as computed by the Python `imagehash` library | 64 | `imagehash`, same extra | 10 or less |
+| `phash-lib` | `ph_dct_imagehash` from libpHash (phash.org), for databases built with the C library | 64 | your own libpHash install | 10 or less |
+| `photodna` | Microsoft PhotoDNA | - | Microsoft's PhotoDNA Cloud Service | decided by the service |
+
+`pdq` and `phash` hashes of the same image are different numbers and are
+never compared with each other; neither is `phash` with `phash-lib`.
+
+```bash
+# Print the hashes of some images (every local algorithm installed here)
+spade hash photo.jpg other.png
+
+# Match against a list; rows are algorithm,hash,id (a header line is fine)
+spade hash photo.jpg --against known.csv
+
+# Also hash the eight rotations and flips, so rotated or mirrored copies match
+spade hash photo.jpg --against known.csv --thorough
+
+# One algorithm, a stricter distance, and the result as JSON
+spade hash photo.jpg -a pdq --against known.csv --max-distance 20 --json out.json
+```
+
+```
+photo.jpg pdq d8f8f0cee0f4a84f0637022a078f67f0b36e2ed596621e1d33e6339c4e9c9b22 quality=100
+photo.jpg phash aca29c1c33dc23d7
+  match bridge (pdq) distance=0 variant=original
+```
+
+In Python, `spade.hashing.hash_image`, `load_hash_list` and `match_hashes` do
+the same; `load_hash_list(path, algorithm="pdq")` also reads lists without an
+algorithm column (`hash,id`, or one bare hash per line). On the server, `POST /hash` does the same
+(see [docs/API.md](docs/API.md#post-hash)), with the list given to
+`spade serve --hash-list known.csv` (or `SPADE_HASH_LIST`) so it stays on the
+server. The JSON forensic report records each input image's hashes, for the
+local algorithms installed, next to its SHA-256.
+
+**Quality.** PDQ gives each hash a quality from 0 to 100. Near-blank and flat
+images score low, and their hashes match too much by chance, so PDQ hashes
+below quality 50 aren't matched (`--min-quality 0` matches them anyway). They
+are still printed, and listed as skipped. pHash has no quality score.
+
+### How the distances were chosen
+
+`python -m spade.bench.hash_robustness` hashes the 13 scikit-image benchmark
+photos and edited copies of each, and prints the largest distance between a
+photo and its edited copy, and the smallest distance between two different
+photos:
+
+| | `pdq` | `phash` |
+|---|---:|---:|
+| resized to 0.5x (largest) | 58 (brick; next is grass, 28) | 2 |
+| resized to 2x (largest) | 10 | 2 |
+| JPEG quality 70 (largest) | 2 | 2 |
+| colour grade 0.15 (largest) | 6 | 2 |
+| 5% cropped (largest) | 110 | 22 |
+| two different photos (smallest) | 108 | 20 |
+| distance used | 31 | 10 |
+
+For `phash`, 10 sits well inside the gap: edited copies move 2 bits at most
+and different photos are at least 20 apart. For `pdq`, 31 is the threshold
+Meta publishes, set on far more images than these, and we keep it. The one
+miss is the brick photo halved in size (58 bits): it is an even, fine texture
+with little large-scale structure, and PDQ's hash of such an image changes a
+lot when it is shrunk, whatever resampling filter is used. Ordinary photos
+stayed under 31. The benchmark is small, so treat these numbers as a sanity
+check rather than error rates; `--max-distance` changes the cutoff. The
+`phash-lib` default copies `phash`'s; it hasn't been measured, because
+libpHash isn't installed where these were run.
+
+### What hashes don't survive
+
+Perceptual hashes describe the whole picture, so they fail when the picture as
+a whole changes: cropping (a 5% crop put every one of the 13 photos above
+past the PDQ threshold, and 2 of them past the pHash one), rotation by angles other than 90 degrees,
+and large local edits such as pasting in or removing a big object. Rotations
+by 90 degrees and mirror images match only with `--thorough`. For those cases,
+and for finding where part of an image came from, use `spade match` and
+`spade search`, which compare regions rather than whole images.
+
+### Licensing and privacy
+
+- `pdqhash` and `imagehash` are BSD-licensed and installed with the `hash`
+  extra.
+- libpHash is GPLv3. SPADE is Apache-2.0 and doesn't ship it or link to it at
+  build time; `phash-lib` only works if you install libpHash yourself (for
+  example `apt install libphash0`, or set `SPADE_PHASH_LIB` to the `.so`).
+  SPADE's tests check `phash-lib` only against a mocked library, not the real
+  libpHash, so check a few hashes against libpHash's own output before relying
+  on it.
+- PhotoDNA needs a licence from Microsoft and a PhotoDNA Cloud Service key in
+  `SPADE_PHOTODNA_KEY`. Using it sends the image to Microsoft. SPADE never
+  does that unless `photodna` is asked for by name, and the report never uses
+  it. The PhotoDNA client is tested only against a mocked service.
+
 ## How it works
 
 A diagram of the architecture and the workflow is in [docs/architecture.drawio](docs/architecture.drawio)
@@ -572,8 +680,10 @@ src/spade/
     verification/  # affine color fit, chi-square test, coherence, NFA, FDR
     aggregation/   # heatmap, localization, match lists
     bench/         # datasets (synthetic, photos, CASIA v2, COVERAGE, CoMoFoD),
-                   # calibration, baselines, downloader
+                   # calibration, baselines, downloader, hash robustness
     engine.py      # main API
+    hashing.py     # perceptual hashes (PDQ, pHash, libpHash) and hash lists
+    photodna.py    # PhotoDNA Cloud Service client
     jpeg.py        # noise level from JPEG quantization tables
     scale.py       # native-scale cue for the report
     provenance.py  # which images share copied regions

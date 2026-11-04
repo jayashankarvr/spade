@@ -281,3 +281,37 @@ def test_pdq_downsample_picks_cimg_pixels():
     edge = np.zeros((512, 300, 3), np.uint8)
     assert _downsample(edge) is edge
 
+
+@pytest.fixture(scope="module")
+def robustness():
+    pytest.importorskip("skimage")
+    from spade.bench.hash_robustness import measure_pairs
+
+    return measure_pairs(("pdq", "phash"))
+
+
+# PDQ on the brick texture moves 58 bits when halved, whatever the resampling
+# filter (56-80 measured). The photo is a fine, even texture with almost no
+# large-scale structure for PDQ's 16x16 DCT to hold on to. 31 is Meta's
+# published threshold and 13 photos are no reason to move it, so this one is
+# recorded as a known miss rather than hidden by a looser threshold.
+_KNOWN_MISSES = {("pdq", "brick", "resize 0.5x")}
+
+
+def test_edited_copies_within_distance(robustness):
+    from spade.bench.hash_robustness import REQUIRED_EDITS
+
+    edited, _ = robustness
+    for (algo, photo, edit), d in edited.items():
+        if edit not in REQUIRED_EDITS:
+            continue
+        if (algo, photo, edit) in _KNOWN_MISSES:
+            assert d > DEFAULT_DISTANCE[algo], "known miss now passes; drop it from _KNOWN_MISSES"
+            continue
+        assert d <= DEFAULT_DISTANCE[algo], (algo, photo, edit, d)
+
+
+def test_unrelated_photos_beyond_distance(robustness):
+    _, unrelated = robustness
+    for (algo, a, b), d in unrelated.items():
+        assert d > DEFAULT_DISTANCE[algo], (algo, a, b, d)

@@ -16,6 +16,7 @@
   - [Configuration](#configuration)
   - [Index Management](#index-management)
   - [Matching](#matching)
+  - [Image Hashes](#image-hashes)
   - [Target Management](#target-management)
 - [Error Handling](#error-handling)
 - [Rate Limiting](#rate-limiting)
@@ -393,6 +394,76 @@ heatmap_bytes = base64.b64decode(response['heatmap_base64'])
 heatmap_image = Image.open(io.BytesIO(heatmap_bytes))
 heatmap_image.save('heatmap.png')
 ```
+
+---
+
+### Image Hashes
+
+#### `POST /hash`
+
+Perceptual hashes of an uploaded image, and the entries of the server's hash
+list it matches. See "Image hashing" in the README for what the algorithms are
+and how the match distances were chosen.
+
+**Request:**
+- **Method**: `POST`
+- **Content-Type**: `multipart/form-data`
+- **Parameters**:
+  - `file` (required, form field): Image file
+  - `algorithm` (optional, query parameter, repeatable): `pdq`, `phash`,
+    `phash-lib` or `photodna`. Default: every local algorithm installed on the
+    server (`photodna` is never included unless named)
+
+Rotations and flips are hashed too when the server runs with `SPADE_THOROUGH=true`.
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/hash?algorithm=pdq&algorithm=phash" \
+  -F "file=@photo.jpg"
+```
+
+**Response:**
+```json
+{
+  "hashes": [
+    {"algorithm": "pdq", "hash": "d8f8f0cee0f4a84f0637022a078f67f0b36e2ed596621e1d33e6339c4e9c9b22",
+     "quality": 100, "variant": "original"},
+    {"algorithm": "phash", "hash": "aca29c1c33dc23d7", "quality": null, "variant": "original"}
+  ],
+  "matches": [
+    {"id": "bridge", "algorithm": "pdq",
+     "hash": "d8f8f0cee0f4a84f0637022a078f67f0b36e2ed596621e1d33e6339c4e9c9b22",
+     "distance": 0, "variant": "original"}
+  ]
+}
+```
+
+**Response Fields:**
+- `hashes`: One entry per algorithm, or eight (one per rotation and flip) in thorough mode
+  - `hash`: Lowercase hex (64 digits for `pdq`, 16 for `phash` and `phash-lib`)
+  - `quality`: PDQ's 0-100 quality score; `null` for pHash. PDQ hashes below
+    50 are not matched
+  - `variant`: `original`, or the rotation/flip that was hashed (`rot90`,
+    `rot180`, `rot270`, `flip_x`, `flip_y`, `flip_diag`, `flip_antidiag`)
+- `matches`: Present only when the server was started with a hash list
+  (`spade serve --hash-list known.csv` or `SPADE_HASH_LIST`). List entries
+  within the algorithm's distance (31 bits for `pdq`, 10 for `phash` and
+  `phash-lib`), nearest first. The list itself stays on the server
+- `photodna`: Present only when `photodna` was asked for: the PhotoDNA Cloud
+  Service's answer, passed through unchanged
+
+**PhotoDNA:** `algorithm=photodna` sends the uploaded image to Microsoft. It is
+refused unless the server operator has a PhotoDNA licence and has set
+`SPADE_PHOTODNA_KEY` on the server.
+
+**Status Codes:**
+- `200 OK`: Hashed
+- `400 Bad Request`: Unknown algorithm or unreadable image
+- `403 Forbidden`: `photodna` asked for but not enabled on this server
+- `413 Payload Too Large`: File exceeds limits
+- `501 Not Implemented`: The algorithm's library isn't installed on the server
+  (the message says how to install it), or the server's PhotoDNA settings are unusable
+- `502 Bad Gateway`: libpHash or the PhotoDNA service failed
 
 ---
 
