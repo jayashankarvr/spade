@@ -452,6 +452,9 @@ spec:
 
 ## How it works
 
+A diagram of the architecture and the workflow is in [docs/architecture.drawio](docs/architecture.drawio)
+(two pages; open it in draw.io / diagrams.net).
+
 1. Extract every patch (default 5x5) and drop flat ones. Targets are also
    indexed at 3/4 and 1/2 size, for copies that were shrunk.
 2. Describe each patch by its normalized luminance pattern: grey levels minus
