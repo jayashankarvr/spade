@@ -88,18 +88,35 @@ def _as_rgb(image: np.ndarray) -> np.ndarray:
     elif image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected a (H, W) or (H, W, 3) image, got shape {image.shape}")
     if image.dtype != np.uint8:
-        # Read it the way the engine's _normalize_image does: float32 up to 1.0
-        # is on the 0..1 scale, anything else is scaled by its own maximum.
-        # Clipping instead would hash a different picture without saying so.
-        values = image.astype(np.float64)
-        if values.size and (not np.isfinite(values).all() or values.min() < 0):
-            raise ValueError("pixel values must be finite and not negative")
-        top = values.max() if values.size else 0.0
-        if image.dtype == np.float32 and top <= 1.0:
-            top = 1.0
-        scale = 255.0 / top if top > 0 else 0.0
-        image = np.rint(values * scale).astype(np.uint8)
+        image = _to_uint8(image)
     return np.ascontiguousarray(image)
+
+
+def _to_uint8(image: np.ndarray) -> np.ndarray:
+    """Convert to uint8 without changing the picture's brightness scale.
+
+    PDQ's quality score is absolute, so stretching a dark frame to full range
+    would let it past the quality gate. Floats are read as 0..1 when nothing
+    exceeds 1, else as 0..255; uint16 as 0..65535; other integers and bool
+    as 0..255. Anything outside those ranges is refused rather than guessed.
+    """
+    if image.dtype == bool:
+        return image.astype(np.uint8) * 255
+    if image.dtype == np.uint16:
+        return ((image.astype(np.uint32) + 128) // 257).astype(np.uint8)
+    if np.issubdtype(image.dtype, np.integer):
+        if image.size and (image.min() < 0 or image.max() > 255):
+            raise ValueError("integer pixels must be within 0..255 (or use uint8/uint16)")
+        return image.astype(np.uint8)
+    if not np.issubdtype(image.dtype, np.floating):
+        raise ValueError(f"unsupported pixel type {image.dtype}")
+    if image.size and not np.isfinite(image).all():
+        raise ValueError("pixel values must be finite")
+    low, top = (image.min(), image.max()) if image.size else (0.0, 0.0)
+    if low < 0 or top > 255:
+        raise ValueError("float pixels must be within 0..1 or 0..255")
+    scale = np.float32(255.0 if top <= 1.0 else 1.0)
+    return np.rint(image.astype(np.float32, copy=False) * scale).astype(np.uint8)
 
 
 def _bits_to_hex(bits: np.ndarray) -> str:
@@ -258,7 +275,11 @@ def hash_image(
     algorithms: Optional[Sequence[str]] = None,
     dihedral: bool = False,
 ) -> List[ImageHash]:
-    """Hash an image with each algorithm; with ``dihedral``, hash all eight variants."""
+    """Hash an image with each algorithm; with ``dihedral``, hash all eight variants.
+
+    ``image`` is (H, W), (H, W, 3) or (H, W, 4). uint8 is used as is; see
+    _to_uint8 for how other pixel types are read.
+    """
     if algorithms is None:
         algorithms = available_algorithms()
     out: List[ImageHash] = []

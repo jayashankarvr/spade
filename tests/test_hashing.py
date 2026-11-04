@@ -324,19 +324,45 @@ def test_dihedral_images_accepts_2d():
     assert all(v.ndim == 3 and v.shape[2] == 3 for v in variants)
 
 
-def test_non_uint8_images_read_like_the_engine():
+def test_pixel_types_keep_their_scale():
+    # Same pixels in different types must give the same hash and quality,
+    # dark frames included: stretching them would get past the quality gate.
     from spade.hashing import _as_rgb
 
-    for bad in (np.full((4, 4, 3), -1.0), np.full((4, 4, 3), np.nan)):
-        with pytest.raises(ValueError, match="finite and not negative"):
-            _as_rgb(bad)
-    ramp = np.linspace(0, 1, 48, dtype=np.float32).reshape(4, 4, 3)
-    expected = np.rint(ramp.astype(np.float64) * 255).astype(np.uint8)
-    np.testing.assert_array_equal(_as_rgb(ramp), expected)
-    # 16-bit and other scales are stretched by their maximum, as in the engine.
-    np.testing.assert_array_equal(_as_rgb((ramp * 65535).astype(np.uint16)).max(), 255)
+    rng = np.random.default_rng(3)
+    for top in (4, 255):
+        pixels = rng.integers(0, top + 1, size=(64, 64, 3), dtype=np.uint8)
+        forms = [
+            pixels.astype(np.uint16) * 257,
+            pixels.astype(np.float32) / 255,
+            pixels.astype(np.float64) / 255,
+            pixels.astype(np.int32),
+        ]
+        if top == 255:
+            forms.append(pixels.astype(np.float64))  # 0..255 floats
+        for form in forms:
+            np.testing.assert_array_equal(_as_rgb(form), pixels, err_msg=str(form.dtype))
     np.testing.assert_array_equal(_as_rgb(np.ones((4, 4, 3), dtype=bool)), 255)
-    assert _as_rgb(np.zeros((4, 4, 3), dtype=np.float32)).max() == 0
+
+
+def test_dark_frame_quality_does_not_depend_on_type():
+    pytest.importorskip("pdqhash")
+    rng = np.random.default_rng(4)
+    dark = rng.integers(0, 5, size=(256, 256, 3), dtype=np.uint8)
+    reference = hash_image(dark, ["pdq"])[0]
+    for form in (dark.astype(np.uint16) * 257, dark.astype(np.float64) / 255):
+        h = hash_image(form, ["pdq"])[0]
+        assert (h.hex, h.quality) == (reference.hex, reference.quality)
+
+
+def test_unreadable_pixel_values_refused():
+    from spade.hashing import _as_rgb
+
+    bad = [np.full((4, 4, 3), -1.0), np.full((4, 4, 3), np.nan), np.full((4, 4, 3), 300.0),
+           np.full((4, 4, 3), 300, dtype=np.int32), np.full((4, 4, 3), -1, dtype=np.int16)]
+    for image in bad:
+        with pytest.raises(ValueError):
+            _as_rgb(image)
 
 
 def test_popcount_table_matches_bitwise_count():

@@ -417,8 +417,9 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
     # anywhere, without creating or truncating the file until there is a result.
     if json_output:
         target = os.path.abspath(json_output)
-        writable = (os.access(target, os.W_OK) if os.path.exists(target)
-                    else os.access(os.path.dirname(target), os.W_OK))
+        folder = os.path.dirname(target)
+        writable = (os.path.isdir(folder) and os.access(folder, os.W_OK)
+                    and (not os.path.exists(target) or os.access(target, os.W_OK)))
         if os.path.isdir(target) or not writable:
             raise click.ClickException(f"Can't write {json_output}")
 
@@ -483,14 +484,14 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
 
     if json_output:
         def hash_dict(h):
-            return {"algorithm": h.algorithm, "hex": h.hex, "quality": h.quality, "variant": h.variant}
+            return {"algorithm": h.algorithm, "hash": h.hex, "quality": h.quality, "variant": h.variant}
 
         doc = {"images": [
             {
                 "path": path,
                 "hashes": [hash_dict(h) for h in hashes],
                 "matches": [
-                    {"id": m.id, "algorithm": m.algorithm, "hex": m.hex,
+                    {"id": m.id, "algorithm": m.algorithm, "hash": m.hex,
                      "distance": m.distance, "variant": m.variant}
                     for m in (result.matches if result else [])
                 ],
@@ -501,10 +502,18 @@ def hash_command(images, algorithms, hash_list, max_distance, min_quality, thoro
         for entry, (_, _, _, verdict) in zip(doc["images"], report):
             if verdict is not None:
                 entry["photodna"] = verdict
+        # Write beside the target and swap it in, so a failed write never
+        # leaves a half-written or emptied report behind.
+        import tempfile
+
+        target = os.path.abspath(json_output)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), suffix=".tmp")
         try:
-            with open(json_output, "w") as f:
+            with os.fdopen(fd, "w") as f:
                 json.dump(doc, f, indent=2)
-        except OSError as e:
+            os.replace(tmp, target)
+        except (OSError, TypeError, ValueError) as e:
+            os.unlink(tmp)
             raise click.ClickException(f"Can't write {json_output}: {e}")
 
 

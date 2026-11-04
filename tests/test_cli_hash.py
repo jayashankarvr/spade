@@ -83,7 +83,7 @@ def test_json_output(tmp_path):
     (image,) = data["images"]
     assert image["path"] == ORIGINAL
     assert image["hashes"][0]["algorithm"] == "pdq"
-    assert image["hashes"][0]["hex"] == expected_pdq("bridge-1-original.jpg")
+    assert image["hashes"][0]["hash"] == expected_pdq("bridge-1-original.jpg")
     assert image["hashes"][0]["quality"] == 100
     assert image["matches"][0]["id"] == "known-1"
     assert image["matches"][0]["distance"] == 0
@@ -215,3 +215,12 @@ def test_failed_run_leaves_json_output_alone(tmp_path):
     result = run(str(broken), "--algorithm", "pdq", "--json", str(out))
     assert result.exit_code != 0
     assert out.read_text() == "earlier result"
+
+
+def test_json_parent_that_is_a_file_fails_early(tmp_path):
+    not_a_folder = tmp_path / "file"
+    not_a_folder.write_text("x")
+    result = run(ORIGINAL, "--algorithm", "pdq", "--json", str(not_a_folder / "out.json"))
+    assert result.exit_code != 0
+    assert "Can't write" in result.output
+    assert ORIGINAL not in result.output
